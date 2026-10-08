@@ -101,10 +101,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
     log(`3Dモデル読込中: ${res.model_name || res.filename}...`);
     try {
-      await viewer.loadPMXFromBase64(res.pmx_base64, res.filename);
+      await viewer.loadPMXFromBase64(res.pmx_base64, res.filename, res.base_dir);
       log("3Dプレビュー表示完了", "info");
     } catch (err) {
-      log(`3Dプレビュー表示失敗: ${err.message}`, "warn");
+      console.error(err);
+      log(`3Dプレビュー表示失敗: ${err.message || err}`, "warn");
     }
 
     updateReadyState();

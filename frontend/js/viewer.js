@@ -119,83 +119,87 @@ class MMDViewer {
     }
   }
 
-  loadPMXFromBase64(base64Data, filename = "model.pmx") {
+  loadPMXFromBase64(base64Data, filename = "model.pmx", resourcePath = "") {
     return new Promise((resolve, reject) => {
-      // Remove old mesh
-      if (this.currentMesh) {
-        this.scene.remove(this.currentMesh);
-        this.helper.remove(this.currentMesh);
-        this.currentMesh = null;
-      }
-
-      // Convert base64 to Blob URL
-      const byteCharacters = atob(base64Data);
-      const byteNumbers = new Array(byteCharacters.length);
-      for (let i = 0; i < byteCharacters.length; i++) {
-        byteNumbers[i] = byteCharacters.charCodeAt(i);
-      }
-      const byteArray = new Uint8Array(byteNumbers);
-      const blob = new Blob([byteArray], { type: "application/octet-stream" });
-      const url = URL.createObjectURL(blob);
-
-      this.loader.load(
-        url,
-        (mesh) => {
-          this.currentMesh = mesh;
-          mesh.castShadow = true;
-          mesh.receiveShadow = true;
-          this.scene.add(mesh);
-          this.helper.add(mesh, { animation: false, physics: false });
-          URL.revokeObjectURL(url);
-          resolve(mesh);
-        },
-        null,
-        (err) => {
-          URL.revokeObjectURL(url);
-          reject(err);
+      try {
+        // Remove old mesh
+        if (this.currentMesh) {
+          this.scene.remove(this.currentMesh);
+          this.helper.remove(this.currentMesh);
+          this.currentMesh = null;
         }
-      );
+
+        const byteCharacters = atob(base64Data);
+        const byteArray = new Uint8Array(byteCharacters.length);
+        for (let i = 0; i < byteCharacters.length; i++) {
+          byteArray[i] = byteCharacters.charCodeAt(i);
+        }
+
+        // Direct parse using MMDParser
+        const parser = this.loader._getParser();
+        const data = parser.parsePmx(byteArray.buffer, true);
+        const builder = this.loader.meshBuilder;
+        const mesh = builder.build(data, resourcePath || "");
+
+        this.currentMesh = mesh;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        this.scene.add(mesh);
+        this.helper.add(mesh, { animation: false, physics: false });
+
+        // Adjust camera to model center
+        if (mesh.geometry) {
+          mesh.geometry.computeBoundingBox();
+          const bbox = mesh.geometry.boundingBox;
+          if (bbox) {
+            const center = new THREE.Vector3();
+            bbox.getCenter(center);
+            this.controls.target.set(center.x, center.y, center.z);
+            const height = bbox.max.y - bbox.min.y;
+            this.camera.position.set(center.x, center.y, center.z + Math.max(height * 1.5, 25));
+            this.controls.update();
+          }
+        }
+
+        resolve(mesh);
+      } catch (err) {
+        reject(err);
+      }
     });
   }
 
   loadVMDFromBase64(base64Data) {
     return new Promise((resolve, reject) => {
-      if (!this.currentMesh) {
-        return reject(new Error("PMX model not loaded in viewer"));
-      }
-
-      const byteCharacters = atob(base64Data);
-      const byteNumbers = new Array(byteCharacters.length);
-      for (let i = 0; i < byteCharacters.length; i++) {
-        byteNumbers[i] = byteCharacters.charCodeAt(i);
-      }
-      const byteArray = new Uint8Array(byteNumbers);
-      const blob = new Blob([byteArray], { type: "application/octet-stream" });
-      const url = URL.createObjectURL(blob);
-
-      this.loader.loadAnimation(
-        url,
-        this.currentMesh,
-        (animation) => {
-          // Remove old animation from helper
-          this.helper.remove(this.currentMesh);
-          this.helper.add(this.currentMesh, {
-            animation: animation,
-            physics: false,
-          });
-
-          this.mixer = this.helper.objects.get(this.currentMesh).mixer;
-          this.totalDuration = animation.duration;
-          this.isPlaying = true;
-          URL.revokeObjectURL(url);
-          resolve(animation);
-        },
-        null,
-        (err) => {
-          URL.revokeObjectURL(url);
-          reject(err);
+      try {
+        if (!this.currentMesh) {
+          return reject(new Error("PMX model not loaded in viewer"));
         }
-      );
+
+        const byteCharacters = atob(base64Data);
+        const byteArray = new Uint8Array(byteCharacters.length);
+        for (let i = 0; i < byteCharacters.length; i++) {
+          byteArray[i] = byteCharacters.charCodeAt(i);
+        }
+
+        // Direct parse using MMDParser
+        const parser = this.loader._getParser();
+        const vmd = parser.parseVmd(byteArray.buffer, true);
+        const builder = this.loader.animationBuilder;
+        const animation = builder.build(vmd, this.currentMesh);
+
+        this.helper.remove(this.currentMesh);
+        this.helper.add(this.currentMesh, {
+          animation: animation,
+          physics: false,
+        });
+
+        this.mixer = this.helper.objects.get(this.currentMesh).mixer;
+        this.totalDuration = animation.duration;
+        this.isPlaying = true;
+        resolve(animation);
+      } catch (err) {
+        reject(err);
+      }
     });
   }
 

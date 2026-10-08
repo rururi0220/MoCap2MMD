@@ -98,7 +98,7 @@ class MoCapAPI:
                 "bones": [b.name for b in tgt.bones],
                 "has_foot_ik": t_map.get("legIK.L") >= 0 and t_map.get("legIK.R") >= 0,
                 "pmx_base64": pmx_b64,
-                "base_dir": os.path.dirname(os.path.abspath(path)),
+                "base_dir": os.path.dirname(os.path.abspath(path)).replace("\\", "/") + "/",
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
