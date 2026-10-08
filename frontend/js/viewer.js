@@ -1,0 +1,240 @@
+/**
+ * 3D Viewport controller using Three.js and MMDLoader
+ */
+class MMDViewer {
+  constructor(containerId) {
+    this.container = document.getElementById(containerId);
+    this.scene = null;
+    this.camera = null;
+    this.renderer = null;
+    this.controls = null;
+    this.helper = null;
+    this.loader = null;
+    this.grid = null;
+
+    this.currentMesh = null;
+    this.currentAction = null;
+    this.mixer = null;
+    this.clock = new THREE.Clock();
+
+    this.isPlaying = false;
+    this.isLooping = true;
+    this.totalDuration = 0;
+    this.onFrameUpdate = null;
+
+    this.init();
+  }
+
+  init() {
+    const width = this.container.clientWidth;
+    const height = this.container.clientHeight;
+
+    // 1. Scene
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color(0x0e1118);
+
+    // 2. Camera
+    this.camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 2000);
+    this.camera.position.set(0, 15, 45);
+
+    // 3. Renderer
+    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    this.renderer.setSize(width, height);
+    this.renderer.setPixelRatio(window.devicePixelRatio);
+    this.renderer.shadowMap.enabled = true;
+    this.container.appendChild(this.renderer.domElement);
+
+    // 4. OrbitControls
+    this.controls = new THREE.OrbitControls(this.camera, this.renderer.domElement);
+    this.controls.target.set(0, 10, 0);
+    this.controls.enableDamping = true;
+    this.controls.dampingFactor = 0.05;
+
+    // 5. Lights
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    this.scene.add(ambientLight);
+
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    dirLight.position.set(20, 40, 20);
+    dirLight.castShadow = true;
+    this.scene.add(dirLight);
+
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.3);
+    hemiLight.position.set(0, 50, 0);
+    this.scene.add(hemiLight);
+
+    // 6. Grid
+    this.grid = new THREE.GridHelper(50, 50, 0x00d2ff, 0x222838);
+    this.grid.position.y = 0;
+    this.scene.add(this.grid);
+
+    // 7. MMD Loader & Animation Helper
+    this.loader = new THREE.MMDLoader();
+    this.helper = new THREE.MMDAnimationHelper({ afterglow: 2.0, resetPhysicsOnLoop: false });
+
+    // Window resize
+    window.addEventListener("resize", () => this.onWindowResize());
+
+    // Render loop
+    this.animate = this.animate.bind(this);
+    requestAnimationFrame(this.animate);
+  }
+
+  onWindowResize() {
+    if (!this.container) return;
+    const width = this.container.clientWidth;
+    const height = this.container.clientHeight;
+    this.camera.aspect = width / height;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(width, height);
+  }
+
+  animate() {
+    requestAnimationFrame(this.animate);
+
+    const delta = this.clock.getDelta();
+
+    if (this.helper && this.currentMesh && this.isPlaying) {
+      this.helper.update(delta);
+
+      if (this.mixer && this.onFrameUpdate) {
+        const time = this.mixer.time;
+        this.onFrameUpdate(time, this.totalDuration);
+      }
+    }
+
+    this.controls.update();
+    this.renderer.render(this.scene, this.camera);
+  }
+
+  resetCamera() {
+    this.camera.position.set(0, 15, 45);
+    this.controls.target.set(0, 10, 0);
+    this.controls.update();
+  }
+
+  toggleGrid() {
+    if (this.grid) {
+      this.grid.visible = !this.grid.visible;
+    }
+  }
+
+  loadPMXFromBase64(base64Data, filename = "model.pmx") {
+    return new Promise((resolve, reject) => {
+      // Remove old mesh
+      if (this.currentMesh) {
+        this.scene.remove(this.currentMesh);
+        this.helper.remove(this.currentMesh);
+        this.currentMesh = null;
+      }
+
+      // Convert base64 to Blob URL
+      const byteCharacters = atob(base64Data);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      const blob = new Blob([byteArray], { type: "application/octet-stream" });
+      const url = URL.createObjectURL(blob);
+
+      this.loader.load(
+        url,
+        (mesh) => {
+          this.currentMesh = mesh;
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          this.scene.add(mesh);
+          this.helper.add(mesh, { animation: false, physics: false });
+          URL.revokeObjectURL(url);
+          resolve(mesh);
+        },
+        null,
+        (err) => {
+          URL.revokeObjectURL(url);
+          reject(err);
+        }
+      );
+    });
+  }
+
+  loadVMDFromBase64(base64Data) {
+    return new Promise((resolve, reject) => {
+      if (!this.currentMesh) {
+        return reject(new Error("PMX model not loaded in viewer"));
+      }
+
+      const byteCharacters = atob(base64Data);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      const blob = new Blob([byteArray], { type: "application/octet-stream" });
+      const url = URL.createObjectURL(blob);
+
+      this.loader.loadAnimation(
+        url,
+        this.currentMesh,
+        (animation) => {
+          // Remove old animation from helper
+          this.helper.remove(this.currentMesh);
+          this.helper.add(this.currentMesh, {
+            animation: animation,
+            physics: false,
+          });
+
+          this.mixer = this.helper.objects.get(this.currentMesh).mixer;
+          this.totalDuration = animation.duration;
+          this.isPlaying = true;
+          URL.revokeObjectURL(url);
+          resolve(animation);
+        },
+        null,
+        (err) => {
+          URL.revokeObjectURL(url);
+          reject(err);
+        }
+      );
+    });
+  }
+
+  play() {
+    this.isPlaying = true;
+  }
+
+  pause() {
+    this.isPlaying = false;
+  }
+
+  stop() {
+    this.isPlaying = false;
+    if (this.mixer) {
+      this.mixer.setTime(0);
+      if (this.onFrameUpdate) {
+        this.onFrameUpdate(0, this.totalDuration);
+      }
+    }
+  }
+
+  seek(ratio) {
+    if (this.mixer && this.totalDuration > 0) {
+      const targetTime = ratio * this.totalDuration;
+      this.mixer.setTime(targetTime);
+      if (this.onFrameUpdate) {
+        this.onFrameUpdate(targetTime, this.totalDuration);
+      }
+    }
+  }
+
+  setLoop(loop) {
+    this.isLooping = loop;
+    if (this.mixer) {
+      // Configure loop mode if action exists
+      const obj = this.helper.objects.get(this.currentMesh);
+      if (obj && obj.action) {
+        obj.action.loop = loop ? THREE.LoopRepeat : THREE.LoopOnce;
+      }
+    }
+  }
+}
