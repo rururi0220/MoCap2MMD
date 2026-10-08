@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MoCap2MMD - FBX / BVH to VMD Retargeting Tool</title>
+  <link rel="stylesheet" href="css/style.css">
+  <!-- Three.js and MMD Stack -->
+  <script src="js/libs/three.min.js"></script>
+  <script src="js/libs/CCDIKSolver.js"></script>
+  <script src="js/libs/OrbitControls.js"></script>
+  <script src="js/libs/TGALoader.js"></script>
+  <script src="js/libs/mmdparser.js"></script>
+  <script src="js/libs/MMDLoader.js"></script>
+  <script src="js/libs/MMDAnimationHelper.js"></script>
+</head>
+<body>
+  <!-- Header -->
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-logo">M2M</div>
+      <h1 class="brand-title">MoCap2MMD</h1>
+      <span class="brand-badge">v3.1 MIT</span>
+    </div>
+    <div class="header-status">
+      <span id="system-status-text">システム準備完了</span>
+      <div class="status-dot"></div>
+    </div>
+  </header>
+
+  <!-- Main Work Area -->
+  <div class="app-body">
+    <!-- Left Sidebar: File Inputs & Convert -->
+    <aside class="sidebar">
+      <!-- Source Motion Panel -->
+      <div class="panel-card">
+        <div class="card-title">
+          <span>ソースモーション</span>
+          <span id="motion-badge" style="font-size: 10px; color: var(--text-muted);">未読込</span>
+        </div>
+        <div class="dropzone" id="source-dropzone">
+          <div class="dropzone-icon">🏃</div>
+          <div class="dropzone-text">FBX / BVH ファイルを選択</div>
+          <div class="dropzone-hint">クリックまたはドラッグ＆ドロップ</div>
+        </div>
+        <div class="file-info-badge" id="source-info" style="display: none;">
+          <div class="file-info-row">
+            <span>ファイル:</span>
+            <span class="file-info-val" id="info-src-name">-</span>
+          </div>
+          <div class="file-info-row">
+            <span>フレーム / FPS:</span>
+            <span class="file-info-val" id="info-src-frames">-</span>
+          </div>
+          <div class="file-info-row">
+            <span>推定プリセット:</span>
+            <span class="file-info-val" id="info-src-preset">-</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Target PMX Panel -->
+      <div class="panel-card">
+        <div class="card-title">
+          <span>ターゲットモデル (PMX)</span>
+          <span id="pmx-badge" style="font-size: 10px; color: var(--text-muted);">未読込</span>
+        </div>
+        <div class="dropzone" id="pmx-dropzone">
+          <div class="dropzone-icon">💃</div>
+          <div class="dropzone-text">PMX モデルを選択</div>
+          <div class="dropzone-hint">クリックまたはドラッグ＆ドロップ</div>
+        </div>
+        <div class="file-info-badge" id="pmx-info" style="display: none;">
+          <div class="file-info-row">
+            <span>モデル名:</span>
+            <span class="file-info-val" id="info-pmx-name">-</span>
+          </div>
+          <div class="file-info-row">
+            <span>ボーン数:</span>
+            <span class="file-info-val" id="info-pmx-bones">-</span>
+          </div>
+          <div class="file-info-row">
+            <span>足IK対応:</span>
+            <span class="file-info-val" id="info-pmx-ik">-</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Execution Panel -->
+      <div class="panel-card">
+        <button class="btn btn-primary" id="btn-retarget" disabled>
+          <span>⚡ 変換実行 & プレビュー</span>
+        </button>
+        <button class="btn btn-secondary" id="btn-export-vmd" disabled>
+          <span>💾 VMD保存 (.vmd)</span>
+        </button>
+      </div>
+
+      <!-- Console Log -->
+      <div class="panel-card" style="flex: 1;">
+        <div class="card-title">処理ログ</div>
+        <div class="log-console" id="log-console">
+          <div class="log-entry info">> MoCap2MMD 起動完了</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Center: 3D Viewport -->
+    <main class="viewport-container">
+      <div class="viewport-overlay">
+        <button class="icon-btn" id="btn-camera-reset" title="カメラリセット">🎯</button>
+        <button class="icon-btn" id="btn-toggle-grid" title="グリッド切替">▦</button>
+      </div>
+
+      <div id="three-canvas-container"></div>
+
+      <!-- Playback Bar -->
+      <div class="playback-bar">
+        <div class="play-controls">
+          <button class="icon-btn" id="btn-play-pause">▶</button>
+          <button class="icon-btn" id="btn-stop">⏹</button>
+        </div>
+
+        <div class="timeline-slider-container">
+          <input type="range" id="timeline-slider" min="0" max="100" value="0" disabled>
+          <div class="time-readout">
+            <span id="time-current">00:00 / F: 0</span>
+            <span id="time-total">00:00 / F: 0</span>
+          </div>
+        </div>
+
+        <div class="form-control-row" style="gap: 6px;">
+          <label class="toggle-row" style="margin: 0;">
+            <span style="font-size: 11px; color: var(--text-secondary); margin-right: 6px;">ループ</span>
+            <label class="switch">
+              <input type="checkbox" id="chk-loop" checked>
+              <span class="slider"></span>
+            </label>
+          </label>
+        </div>
+      </div>
+    </main>
+
+    <!-- Right Sidebar: Retarget Settings & Bone Mapping -->
+    <aside class="sidebar right-sidebar">
+      <!-- Settings Panel -->
+      <div class="panel-card">
+        <div class="card-title">リターゲティング調整</div>
+
+        <div class="form-group">
+          <div class="form-label">
+            <span>移動スケール倍率</span>
+            <span id="val-scale">1.00x</span>
+          </div>
+          <input type="range" id="slider-scale" min="0.1" max="3.0" step="0.05" value="1.0">
+        </div>
+
+        <label class="toggle-row">
+          <span class="toggle-label">足IK / つま先IK 自動生成</span>
+          <label class="switch">
+            <input type="checkbox" id="chk-ik" checked>
+            <span class="slider"></span>
+          </label>
+        </label>
+
+        <label class="toggle-row">
+          <span class="toggle-label">腕 / 手 捩りボーン分離</span>
+          <label class="switch">
+            <input type="checkbox" id="chk-twist" checked>
+            <span class="slider"></span>
+          </label>
+        </label>
+
+        <label class="toggle-row">
+          <span class="toggle-label">指ボーン FK 転送</span>
+          <label class="switch">
+            <input type="checkbox" id="chk-fingers" checked>
+            <span class="slider"></span>
+          </label>
+        </label>
+
+        <label class="toggle-row">
+          <span class="toggle-label">Aポーズ ↔ Tポーズ 自動補正</span>
+          <label class="switch">
+            <input type="checkbox" id="chk-a-pose" checked>
+            <span class="slider"></span>
+          </label>
+        </label>
+      </div>
+
+      <!-- Mapping Table Panel -->
+      <div class="panel-card" style="flex: 1;">
+        <div class="card-title">自動同定ボーン対応表</div>
+        <div class="mapping-table" id="mapping-table-list">
+          <div style="padding: 12px; color: var(--text-muted); font-size: 11px; text-align: center;">
+            モーションファイルを読み込むと対応表が表示されます
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Scripts -->
+  <script src="js/viewer.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
