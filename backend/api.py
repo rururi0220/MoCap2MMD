@@ -29,7 +29,9 @@ class MoCapAPI:
         if not self._window:
             return None
         file_types = ("Motion Files (*.fbx;*.bvh)", "FBX Files (*.fbx)", "BVH Files (*.bvh)", "All Files (*.*)")
-        res = self._window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=False, file_types=file_types)
+        dialog_type = getattr(webview, "FileDialog", None)
+        open_dlg = dialog_type.OPEN if dialog_type else webview.OPEN_DIALOG
+        res = self._window.create_file_dialog(open_dlg, allow_multiple=False, file_types=file_types)
         if not res or len(res) == 0:
             return None
         path = res[0]
@@ -40,7 +42,9 @@ class MoCapAPI:
         if not self._window:
             return None
         file_types = ("MMD PMX Model (*.pmx)", "All Files (*.*)")
-        res = self._window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=False, file_types=file_types)
+        dialog_type = getattr(webview, "FileDialog", None)
+        open_dlg = dialog_type.OPEN if dialog_type else webview.OPEN_DIALOG
+        res = self._window.create_file_dialog(open_dlg, allow_multiple=False, file_types=file_types)
         if not res or len(res) == 0:
             return None
         path = res[0]
@@ -155,8 +159,10 @@ class MoCapAPI:
             return {"success": False, "error": "No motion converted yet"}
 
         file_types = ("Vocaloid Motion Data (*.vmd)", "All Files (*.*)")
+        dialog_type = getattr(webview, "FileDialog", None)
+        save_dlg = dialog_type.SAVE if dialog_type else webview.SAVE_DIALOG
         res = self._window.create_file_dialog(
-            webview.SAVE_DIALOG,
+            save_dlg,
             save_filename=default_name,
             file_types=file_types,
         )
