@@ -42,6 +42,8 @@ class MMDViewer {
     this.renderer.setSize(width, height);
     this.renderer.setPixelRatio(window.devicePixelRatio);
     this.renderer.shadowMap.enabled = true;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 0.95;
     this.container.appendChild(this.renderer.domElement);
 
     // 4. OrbitControls
@@ -50,16 +52,20 @@ class MMDViewer {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.05;
 
-    // 5. Lights
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    // 5. Lights (calibrated to prevent white blowout)
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
     this.scene.add(ambientLight);
 
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    dirLight.position.set(20, 40, 20);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    dirLight.position.set(15, 30, 20);
     dirLight.castShadow = true;
     this.scene.add(dirLight);
 
-    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.3);
+    const fillLight = new THREE.DirectionalLight(0xffffff, 0.25);
+    fillLight.position.set(-15, 20, -15);
+    this.scene.add(fillLight);
+
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x333333, 0.15);
     hemiLight.position.set(0, 50, 0);
     this.scene.add(hemiLight);
 
@@ -119,7 +125,7 @@ class MMDViewer {
     }
   }
 
-  loadPMXFromBase64(base64Data, filename = "model.pmx", resourcePath = "") {
+  loadPMXFromBase64(base64Data, filename = "model.pmx", resourcePath = "", textures = {}) {
     return new Promise((resolve, reject) => {
       try {
         // Remove old mesh
@@ -128,6 +134,30 @@ class MMDViewer {
           this.helper.remove(this.currentMesh);
           this.currentMesh = null;
         }
+
+        // Set URL modifier on LoadingManager to resolve textures from Base64 data URLs
+        this.loader.manager.setURLModifier((url) => {
+          if (!url) return url;
+          let decoded = url;
+          try {
+            decoded = decodeURI(url);
+          } catch (_) {}
+          const normalized = decoded.replace(/\\/g, "/");
+
+          for (const [key, dataUrl] of Object.entries(textures)) {
+            const normKey = key.replace(/\\/g, "/");
+            const baseKey = normKey.split("/").pop();
+            if (
+              normalized.endsWith(normKey) ||
+              decoded.endsWith(key) ||
+              normalized.endsWith("/" + baseKey) ||
+              normalized === baseKey
+            ) {
+              return dataUrl;
+            }
+          }
+          return url;
+        });
 
         const byteCharacters = atob(base64Data);
         const byteArray = new Uint8Array(byteCharacters.length);
@@ -140,6 +170,24 @@ class MMDViewer {
         const data = parser.parsePmx(byteArray.buffer, true);
         const builder = this.loader.meshBuilder;
         const mesh = builder.build(data, resourcePath || "");
+
+        // Enhance material visibility, calibrate lighting, and ensure double-sided rendering
+        if (mesh.material) {
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          mats.forEach((mat) => {
+            mat.side = THREE.DoubleSide;
+            // Prevent severe overexposure blowout: MMDLoader maps ambient directly to emissive
+            if (mat.emissive) {
+              mat.emissive.multiplyScalar(0.05);
+            }
+            // Prevent invisible rendering if texture failed or alpha is zero unintentionally
+            if (mat.opacity === 0 && (!mat.name || !mat.name.toLowerCase().includes("shadow"))) {
+              mat.opacity = 1.0;
+              mat.transparent = false;
+            }
+            mat.needsUpdate = true;
+          });
+        }
 
         this.currentMesh = mesh;
         mesh.castShadow = true;
