@@ -42,6 +42,8 @@ class MMDViewer {
     this.renderer.setSize(width, height);
     this.renderer.setPixelRatio(window.devicePixelRatio);
     this.renderer.shadowMap.enabled = true;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 0.95;
     this.container.appendChild(this.renderer.domElement);
 
     // 4. OrbitControls
@@ -50,16 +52,20 @@ class MMDViewer {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.05;
 
-    // 5. Lights
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    // 5. Lights (calibrated to prevent white blowout)
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
     this.scene.add(ambientLight);
 
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    dirLight.position.set(20, 40, 20);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    dirLight.position.set(15, 30, 20);
     dirLight.castShadow = true;
     this.scene.add(dirLight);
 
-    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.3);
+    const fillLight = new THREE.DirectionalLight(0xffffff, 0.25);
+    fillLight.position.set(-15, 20, -15);
+    this.scene.add(fillLight);
+
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x333333, 0.15);
     hemiLight.position.set(0, 50, 0);
     this.scene.add(hemiLight);
 
@@ -165,11 +171,15 @@ class MMDViewer {
         const builder = this.loader.meshBuilder;
         const mesh = builder.build(data, resourcePath || "");
 
-        // Enhance material visibility and ensure double-sided rendering
+        // Enhance material visibility, calibrate lighting, and ensure double-sided rendering
         if (mesh.material) {
           const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
           mats.forEach((mat) => {
             mat.side = THREE.DoubleSide;
+            // Prevent severe overexposure blowout: MMDLoader maps ambient directly to emissive
+            if (mat.emissive) {
+              mat.emissive.multiplyScalar(0.05);
+            }
             // Prevent invisible rendering if texture failed or alpha is zero unintentionally
             if (mat.opacity === 0 && (!mat.name || !mat.name.toLowerCase().includes("shadow"))) {
               mat.opacity = 1.0;

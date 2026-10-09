@@ -248,6 +248,6 @@ def load_pmx(path: str) -> PMXModel:
                     link.limit_min = r.read("3f")
                     link.limit_max = r.read("3f")
                 b.ik_links.append(link)
-            bones.append(b)
+        bones.append(b)
 
     return PMXModel(name=name, name_en=name_en, version=version, bones=bones, textures=textures, path=path)
