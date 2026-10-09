@@ -29,16 +29,24 @@ LIMB_SEMANTICS = ("shoulder", "upperArm", "lowerArm", "hand", "upperLeg", "lower
 
 # core (normalized, side-less) name -> semantic
 _ALIASES = {
-    "upperArm": ["upperarm", "arm", "uparm", "humerus", "shoulderjoint"],
-    "lowerArm": ["forearm", "lowerarm", "lowarm", "elbow"],
+    "upperArm": ["uarm", "upperarm", "arm", "uparm", "humerus", "shoulderjoint"],
+    "lowerArm": ["larm", "forearm", "lowerarm", "lowarm", "elbow"],
     "hand": ["hand", "wrist"],
     "shoulder": ["shoulder", "clavicle", "collar", "collarbone"],
-    "upperLeg": ["upleg", "upperleg", "thigh", "uleg", "femur"],
-    "lowerLeg": ["leg", "lowerleg", "lowleg", "calf", "shin", "knee", "crus"],
+    "upperLeg": ["thigh", "upleg", "upperleg", "uleg", "femur"],
+    "lowerLeg": ["shank", "calf", "shin", "lowerleg", "lowleg", "knee", "crus", "leg"],
     "foot": ["foot", "ankle"],
     "toes": ["toebase", "toes", "toe", "ball", "toe0", "footend"],
 }
 _CORE_TO_SEM = {alias: sem for sem, al in _ALIASES.items() for alias in al}
+
+_TRUNK_ALIASES = {
+    "hips": ["pelvis", "hips", "hip"],
+    "spine": ["abdomen", "spine", "spine1", "lowerback", "waist"],
+    "chest": ["thorax", "chest", "spine2", "upperback"],
+    "neck": ["neck"],
+    "head": ["head"],
+}
 
 _FINGER_ALIASES = {
     "thumb": ["thumb"],
@@ -98,6 +106,8 @@ def side_and_core(name: str) -> tuple[str | None, str, list[str]]:
 
 def detect_preset(names: list[str]) -> str:
     low = " ".join(names).lower()
+    if "theia" in low or "shank" in low or "uarm" in low or "thorax" in low:
+        return "Theia3D"
     if "mixamorig" in low:
         return "Mixamo"
     if "j_bip_" in low:
@@ -156,7 +166,7 @@ def map_source(sm: SourceMotion, overrides: dict[str, str] | None = None) -> Sou
     # --- 1. dictionary matching ---
     cands: dict[str, list[int]] = {}
     finger_cands: dict[str, list[int]] = {}
-    neck_c, head_c = [], []
+    trunk_cands: dict[str, list[int]] = {}
     for j, nm in enumerate(sm.names):
         side, core, toks = side_and_core(nm)
         if any(w in core for w in ("twist", "roll", "share", "helper", "jiggle")):
@@ -181,20 +191,24 @@ def map_source(sm: SourceMotion, overrides: dict[str, str] | None = None) -> Sou
             if sem:
                 cands.setdefault(_key(sem, side), []).append(j)
         else:
-            if core_nodig == "neck":
-                neck_c.append(j)
-            elif core_nodig == "head":
-                head_c.append(j)
+            for tsem, als in _TRUNK_ALIASES.items():
+                if core in als or core_nodig in als:
+                    trunk_cands.setdefault(tsem, []).append(j)
+                    break
 
     for key, js in cands.items():
         assign(key, min(js, key=lambda j: depth[j]), "name")
-    if neck_c:
-        assign("neck", min(neck_c, key=lambda j: depth[j]), "name")
-    if head_c:
-        assign("head", min(head_c, key=lambda j: depth[j]), "name")
+    for tsem in ("hips", "neck", "head"):
+        if tsem in trunk_cands:
+            assign(tsem, min(trunk_cands[tsem], key=lambda j: depth[j]), "name")
 
-    # --- 3. geometric fallback for limbs (done before hierarchy so hips can be derived) ---
-    if not all(_key(s, sd) in res.bones for s in ("upperLeg", "upperArm") for sd in SIDES):
+    # --- 3. geometric fallback for limbs (only if essential limbs missing) ---
+    needed_limbs = [
+        _key(s, sd)
+        for s in ("upperLeg", "lowerLeg", "upperArm", "lowerArm")
+        for sd in SIDES
+    ]
+    if not all(k in res.bones for k in needed_limbs):
         _geometric_fallback(sm, res, assign)
 
     # --- 2. hierarchy inference ---
@@ -224,9 +238,10 @@ def map_source(sm: SourceMotion, overrides: dict[str, str] | None = None) -> Sou
     hips = res.get("hips")
 
     ual, uar = res.get("upperArm.L"), res.get("upperArm.R")
-    chest = sm.lca(ual, uar) if ual >= 0 and uar >= 0 else -1
+    chest = trunk_cands.get("chest", [-1])[0] if "chest" in trunk_cands else -1
+    if chest < 0 and ual >= 0 and uar >= 0:
+        chest = sm.lca(ual, uar)
     if res.get("neck") < 0 and chest >= 0:
-        # neck = child of chest that is not on an arm path and goes upward
         arm_anc = set(sm.ancestors(ual)) | set(sm.ancestors(uar)) | {ual, uar}
         ups = [c for c in sm.children(chest) if c not in arm_anc]
         if ups:
