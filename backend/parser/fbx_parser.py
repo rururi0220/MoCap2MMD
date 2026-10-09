@@ -47,9 +47,7 @@ def parse_fbx(path: str, sample_fps: float = 30.0, stack_index: int | None = Non
         path,
         ignore_geometry=True,
         ignore_embedded=True,
-        target_axes=ufbx.axes_right_handed_y_up,
         target_unit_meters=1.0,
-        space_conversion=ufbx.SpaceConversion.ADJUST_TRANSFORMS,
     )
 
     all_nodes = list(scene.nodes)
