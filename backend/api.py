@@ -92,6 +92,42 @@ class MoCapAPI:
                 pmx_data = f.read()
             pmx_b64 = base64.b64encode(pmx_data).decode("ascii")
 
+            # Load textures as Base64 data URLs for frontend Three.js viewer
+            pmx_dir = os.path.dirname(os.path.abspath(path))
+            textures_map = {}
+            for t_name in tgt.textures:
+                norm = t_name.replace("\\", "/")
+                cand_paths = [
+                    os.path.join(pmx_dir, t_name),
+                    os.path.join(pmx_dir, norm),
+                    os.path.join(pmx_dir, os.path.basename(t_name)),
+                    os.path.join(pmx_dir, "tex", os.path.basename(t_name)),
+                ]
+                full_path = None
+                for cp in cand_paths:
+                    if os.path.exists(cp) and os.path.isfile(cp):
+                        full_path = cp
+                        break
+                if full_path:
+                    try:
+                        ext = os.path.splitext(full_path)[1].lower()
+                        mime = "image/png"
+                        if ext in (".jpg", ".jpeg"):
+                            mime = "image/jpeg"
+                        elif ext == ".bmp":
+                            mime = "image/bmp"
+                        elif ext == ".tga":
+                            mime = "image/x-tga"
+                        with open(full_path, "rb") as tf:
+                            t_bytes = tf.read()
+                        b64 = base64.b64encode(t_bytes).decode("ascii")
+                        data_url = f"data:{mime};base64,{b64}"
+                        textures_map[t_name] = data_url
+                        textures_map[norm] = data_url
+                        textures_map[os.path.basename(t_name)] = data_url
+                    except Exception:
+                        pass
+
             return {
                 "success": True,
                 "path": path,
@@ -102,7 +138,8 @@ class MoCapAPI:
                 "bones": [b.name for b in tgt.bones],
                 "has_foot_ik": t_map.get("legIK.L") >= 0 and t_map.get("legIK.R") >= 0,
                 "pmx_base64": pmx_b64,
-                "base_dir": os.path.dirname(os.path.abspath(path)).replace("\\", "/") + "/",
+                "base_dir": pmx_dir.replace("\\", "/") + "/",
+                "textures": textures_map,
             }
         except Exception as e:
             return {"success": False, "error": str(e)}

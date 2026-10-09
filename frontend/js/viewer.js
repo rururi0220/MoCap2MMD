@@ -119,7 +119,7 @@ class MMDViewer {
     }
   }
 
-  loadPMXFromBase64(base64Data, filename = "model.pmx", resourcePath = "") {
+  loadPMXFromBase64(base64Data, filename = "model.pmx", resourcePath = "", textures = {}) {
     return new Promise((resolve, reject) => {
       try {
         // Remove old mesh
@@ -128,6 +128,30 @@ class MMDViewer {
           this.helper.remove(this.currentMesh);
           this.currentMesh = null;
         }
+
+        // Set URL modifier on LoadingManager to resolve textures from Base64 data URLs
+        this.loader.manager.setURLModifier((url) => {
+          if (!url) return url;
+          let decoded = url;
+          try {
+            decoded = decodeURI(url);
+          } catch (_) {}
+          const normalized = decoded.replace(/\\/g, "/");
+
+          for (const [key, dataUrl] of Object.entries(textures)) {
+            const normKey = key.replace(/\\/g, "/");
+            const baseKey = normKey.split("/").pop();
+            if (
+              normalized.endsWith(normKey) ||
+              decoded.endsWith(key) ||
+              normalized.endsWith("/" + baseKey) ||
+              normalized === baseKey
+            ) {
+              return dataUrl;
+            }
+          }
+          return url;
+        });
 
         const byteCharacters = atob(base64Data);
         const byteArray = new Uint8Array(byteCharacters.length);
@@ -140,6 +164,20 @@ class MMDViewer {
         const data = parser.parsePmx(byteArray.buffer, true);
         const builder = this.loader.meshBuilder;
         const mesh = builder.build(data, resourcePath || "");
+
+        // Enhance material visibility and ensure double-sided rendering
+        if (mesh.material) {
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          mats.forEach((mat) => {
+            mat.side = THREE.DoubleSide;
+            // Prevent invisible rendering if texture failed or alpha is zero unintentionally
+            if (mat.opacity === 0 && (!mat.name || !mat.name.toLowerCase().includes("shadow"))) {
+              mat.opacity = 1.0;
+              mat.transparent = false;
+            }
+            mat.needsUpdate = true;
+          });
+        }
 
         this.currentMesh = mesh;
         mesh.castShadow = true;

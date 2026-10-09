@@ -70,6 +70,7 @@ class PMXModel:
     name_en: str
     version: float
     bones: list[PMXBone]
+    textures: list[str] = field(default_factory=list)
     path: str = ""
 
     def __post_init__(self):
@@ -199,8 +200,7 @@ def load_pmx(path: str) -> PMXModel:
     r.skip(n_idx * vsize)
 
     # ---------------- textures ----------------
-    for _ in range(r.i32()):
-        text()
+    textures = [text() for _ in range(r.i32())]
 
     # ---------------- materials ----------------
     for _ in range(r.i32()):
@@ -248,6 +248,6 @@ def load_pmx(path: str) -> PMXModel:
                     link.limit_min = r.read("3f")
                     link.limit_max = r.read("3f")
                 b.ik_links.append(link)
-        bones.append(b)
+            bones.append(b)
 
-    return PMXModel(name=name, name_en=name_en, version=version, bones=bones, path=path)
+    return PMXModel(name=name, name_en=name_en, version=version, bones=bones, textures=textures, path=path)
