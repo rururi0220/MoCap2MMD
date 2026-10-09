@@ -145,7 +145,7 @@ class MMDViewer {
         mesh.castShadow = true;
         mesh.receiveShadow = true;
         this.scene.add(mesh);
-        this.helper.add(mesh, { animation: false, physics: false });
+        this.helper.add(mesh, { physics: false });
 
         // Adjust camera to model center
         if (mesh.geometry) {
