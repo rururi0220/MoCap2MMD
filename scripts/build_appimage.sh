@@ -6,7 +6,7 @@ set -e
 # ==============================================================================
 
 echo ">>> [1/5] Checking environment and dependencies..."
-python3 -m pip install -r requirements.txt pyinstaller PyGObject || true
+python3 -m pip install -r requirements.txt pyinstaller "PyGObject<3.52.0" || true
 
 echo ">>> [2/5] Building standalone ELF binary with PyInstaller..."
 python3 -m PyInstaller MoCap2MMD.spec --noconfirm --clean

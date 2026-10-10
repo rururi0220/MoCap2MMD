@@ -86,7 +86,7 @@ jobs:
 
   build-linux:
     name: Build Linux AppImage
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -117,7 +117,7 @@ jobs:
       - name: Install dependencies
         run: |
           python3 -m pip install --upgrade pip setuptools wheel
-          python3 -m pip install -r requirements.txt pyinstaller PyGObject
+          python3 -m pip install -r requirements.txt pyinstaller "PyGObject<3.52.0"
 
       - name: Build Linux AppImage
         run: |
