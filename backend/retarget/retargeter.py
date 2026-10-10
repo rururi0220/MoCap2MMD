@@ -412,48 +412,47 @@ class Retargeter:
         toe_ik_t = self.tgt_map.get(_key("toeIK", sd))
 
         if ul_s >= 0 and ll_s >= 0 and ft_s >= 0 and ul_t >= 0 and ll_t >= 0 and ft_t >= 0:
-            p_ul = self.target.bones[ul_t].position
-            p_ll = self.target.bones[ll_t].position
-            p_ft = self.target.bones[ft_t].position
+            # 1. Thigh relative rotation from pelvis
+            p_thigh = self.source.parents[ul_s]
+            r_cur = np.linalg.inv(rot_lh[:, p_thigh]) @ rot_lh[:, ul_s]
+            r_ref = np.linalg.inv(ref_rot_lh[p_thigh]) @ ref_rot_lh[ul_s]
+            r_thigh = r_cur @ np.linalg.inv(r_ref)
 
-            l_thigh = np.linalg.norm(p_ll - p_ul)
-            l_shank = np.linalg.norm(p_ft - p_ll)
+            # 2. Knee relative rotation from thigh
+            p_knee = self.source.parents[ll_s]
+            r_cur = np.linalg.inv(rot_lh[:, p_knee]) @ rot_lh[:, ll_s]
+            r_ref = np.linalg.inv(ref_rot_lh[p_knee]) @ ref_rot_lh[ll_s]
+            r_knee = r_cur @ np.linalg.inv(r_ref)
 
-            v_leg_rest = np.array([0.0, -1.0, 0.0])
-            v_thigh_cur = normalize(pos_lh[:, ll_s] - pos_lh[:, ul_s])
-            v_shank_cur = normalize(pos_lh[:, ft_s] - pos_lh[:, ll_s])
+            # 3. Foot relative rotation from knee
+            p_foot = self.source.parents[ft_s]
+            r_cur = np.linalg.inv(rot_lh[:, p_foot]) @ rot_lh[:, ft_s]
+            r_ref = np.linalg.inv(ref_rot_lh[p_foot]) @ ref_rot_lh[ft_s]
+            r_foot = r_cur @ np.linalg.inv(r_ref)
 
-            # World orientation of thigh and shank from 3D vectors
-            R_thigh_world = np.zeros((n_frames, 3, 3))
-            R_shank_world = np.zeros((n_frames, 3, 3))
-            for f in range(n_frames):
-                R_thigh_world[f] = rotation_between(v_leg_rest, v_thigh_cur[f])
-                R_shank_world[f] = rotation_between(v_leg_rest, v_shank_cur[f])
+            # Always populate FK leg tracks with anatomical relative rotations
+            tracks[self.target.bones[ul_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(r_thigh))
+            tracks[self.target.bones[ll_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(r_knee))
+            tracks[self.target.bones[ft_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(r_foot))
 
-            # Parent world rotation for thigh (センター)
-            center_pmx = self.tgt_map.get("center")
-            center_name = self.target.bones[center_pmx].name if center_pmx >= 0 else None
-            R_center = quat_to_mat(tracks[center_name][1]) if center_name and center_name in tracks else np.broadcast_to(np.eye(3), (n_frames, 3, 3))
-
-            R_thigh_local = np.linalg.inv(R_center) @ R_thigh_world
-            R_knee_local = np.linalg.inv(R_thigh_world) @ R_shank_world
-
-            # Foot orientation: extract horizontal yaw and pitch (zero roll)
-            ft_rot = rot_lh[:, ft_s] @ np.linalg.inv(ref_rot_lh[ft_s])
-            v_fwd = ft_rot @ np.array([0.0, 0.0, -1.0])
-            yaw = np.arctan2(-v_fwd[:, 0], -v_fwd[:, 2])
-            pitch = np.arcsin(np.clip(-v_fwd[:, 1], -1.0, 1.0))
-            eulers = np.stack([yaw, pitch, np.zeros_like(yaw)], axis=-1)
-            ft_quat = Rotation.from_euler("yxz", eulers, degrees=False).as_quat()
-
-            # Always populate FK leg tracks (prevents broken posture in FK mode)
-            tracks[self.target.bones[ul_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(R_thigh_local))
-            tracks[self.target.bones[ll_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(R_knee_local))
-            tracks[self.target.bones[ft_t].name] = (np.zeros((n_frames, 3)), ft_quat)
-
-            # Foot IK target placed at the natural anatomical FK foot position
+            # 4. Foot IK target placed at the exact FK foot reach
             if self.cfg.enable_foot_ik and leg_ik_t >= 0:
+                p_ul = self.target.bones[ul_t].position
+                p_ll = self.target.bones[ll_t].position
+                p_ft = self.target.bones[ft_t].position
                 p_ik = self.target.bones[leg_ik_t].position
+
+                v_thigh_rest = p_ll - p_ul
+                v_shin_rest = p_ft - p_ll
+
+                v_thigh = np.einsum("fij,j->fi", r_thigh, v_thigh_rest)
+                r_knee_world = r_thigh @ r_knee
+                v_shin = np.einsum("fij,j->fi", r_knee_world, v_shin_rest)
+                r_foot_rel = v_thigh + v_shin
+
+                center_pmx = self.tgt_map.get("center")
+                center_name = self.target.bones[center_pmx].name if center_pmx >= 0 else None
+                R_center = quat_to_mat(tracks[center_name][1]) if center_name and center_name in tracks else np.broadcast_to(np.eye(3), (n_frames, 3, 3))
                 p_center_rest = self.target.bones[center_pmx].position if center_pmx >= 0 else np.zeros(3)
                 c_pos = tracks[center_name][0] if center_name and center_name in tracks else np.zeros((n_frames, 3))
 
@@ -461,8 +460,16 @@ class Retargeter:
                 p_hip_world = p_center_rest + c_pos + np.einsum("fij,j->fi", R_center, (p_ul - p_center_rest))
 
                 # Natural FK foot target in world space
-                p_ik_world = p_hip_world + v_thigh_cur * l_thigh + v_shank_cur * l_shank
+                p_ik_world = p_hip_world + np.einsum("fij,fj->fi", R_center, r_foot_rel)
                 leg_ik_pos = p_ik_world - p_ik
+
+                # Foot world orientation with zero sideways roll
+                ft_rot = rot_lh[:, ft_s] @ np.linalg.inv(ref_rot_lh[ft_s])
+                v_fwd = ft_rot @ np.array([0.0, 0.0, -1.0])
+                yaw = np.arctan2(-v_fwd[:, 0], -v_fwd[:, 2])
+                pitch = np.arcsin(np.clip(-v_fwd[:, 1], -1.0, 1.0))
+                eulers = np.stack([yaw, pitch, np.zeros_like(yaw)], axis=-1)
+                ft_quat = Rotation.from_euler("yxz", eulers, degrees=False).as_quat()
 
                 tracks[self.target.bones[leg_ik_t].name] = (leg_ik_pos, ft_quat)
 
