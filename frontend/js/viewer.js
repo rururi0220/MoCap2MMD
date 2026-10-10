@@ -223,6 +223,36 @@ class MMDViewer {
           return reject(new Error("PMX model not loaded in viewer"));
         }
 
+        // 1. Stop current playback and unbind previous actions
+        this.isPlaying = false;
+        if (this.mixer) {
+          this.mixer.stopAllAction();
+        }
+
+        // 2. Remove mesh from helper before modifying skeleton
+        if (this.helper && this.helper.objects.has(this.currentMesh)) {
+          this.helper.remove(this.currentMesh);
+        }
+
+        // 3. Reset all bones to pristine rest bind pose
+        // AnimationBuilder uses bone.position as basePosition; it must NOT be posed!
+        if (this.currentMesh.geometry && this.currentMesh.geometry.bones) {
+          const gbones = this.currentMesh.geometry.bones;
+          const bones = this.currentMesh.skeleton.bones;
+          for (let i = 0; i < bones.length; i++) {
+            const gb = gbones[i];
+            if (gb) {
+              bones[i].position.fromArray(gb.pos);
+              bones[i].quaternion.fromArray(gb.rotq || [0, 0, 0, 1]);
+              if (gb.scl) bones[i].scale.fromArray(gb.scl);
+            }
+          }
+        }
+        if (typeof this.currentMesh.pose === "function") {
+          this.currentMesh.pose();
+        }
+        this.currentMesh.updateMatrixWorld(true);
+
         const byteCharacters = atob(base64Data);
         const byteArray = new Uint8Array(byteCharacters.length);
         for (let i = 0; i < byteCharacters.length; i++) {
@@ -235,7 +265,6 @@ class MMDViewer {
         const builder = this.loader.animationBuilder;
         const animation = builder.build(vmd, this.currentMesh);
 
-        this.helper.remove(this.currentMesh);
         this.helper.add(this.currentMesh, {
           animation: animation,
           physics: false,
