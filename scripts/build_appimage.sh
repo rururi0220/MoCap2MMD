@@ -59,7 +59,7 @@ fi
 
 echo ">>> [4/5] Fetching appimagetool..."
 if [ ! -f "appimagetool-x86_64.AppImage" ]; then
-    wget -q https://github.com/AppImage/AppImageKit/releases/download/13/appimagetool-x86_64.AppImage
+    wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
     chmod +x appimagetool-x86_64.AppImage
 fi
 
