@@ -131,6 +131,26 @@ def swing_twist(q: np.ndarray, axis: np.ndarray):
     return swing, twist
 
 
+def twist_swing(q: np.ndarray, axis: np.ndarray):
+    """Decompose ``q = twist * swing`` where ``twist`` rotates around ``axis``.
+
+    Returns ``(twist, swing)`` quaternions.
+    """
+    axis = normalize(np.asarray(axis, dtype=np.float64))
+    v = q[..., :3]
+    proj = np.sum(v * axis, axis=-1, keepdims=True) * axis
+    twist = np.concatenate([proj, q[..., 3:4]], axis=-1)
+    n = np.linalg.norm(twist, axis=-1, keepdims=True)
+    identity = np.zeros_like(twist)
+    identity[..., 3] = 1.0
+    twist = np.where(n < 1e-9, identity, twist / np.maximum(n, 1e-12))
+    # swing = twist^-1 * q
+    tw_inv = twist * np.array([-1.0, -1.0, -1.0, 1.0])
+    swing = quat_mul(tw_inv, q)
+    return twist, swing
+
+
+
 def quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     ax, ay, az, aw = np.moveaxis(a, -1, 0)
     bx, by, bz, bw = np.moveaxis(b, -1, 0)
