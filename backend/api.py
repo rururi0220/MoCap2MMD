@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import os
 import io
+import tempfile
 import webview
 
 from backend.parser.bvh_parser import parse_bvh
@@ -183,7 +184,7 @@ class MoCapAPI:
 
             # Export to in-memory bytes
             buf = io.BytesIO()
-            tmp_path = "_temp_preview.vmd"
+            tmp_path = os.path.join(tempfile.gettempdir(), "_mocap2mmd_preview.vmd")
             write_vmd(tmp_path, vmd)
             with open(tmp_path, "rb") as f:
                 vmd_data = f.read()

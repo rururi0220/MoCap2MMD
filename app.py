@@ -12,7 +12,10 @@ def main():
     api = MoCapAPI()
 
     # Determine absolute path to frontend/index.html
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        base_dir = sys._MEIPASS
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
     frontend_path = os.path.join(base_dir, "frontend", "index.html")
 
     if not os.path.exists(frontend_path):
