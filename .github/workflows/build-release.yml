@@ -1,0 +1,138 @@
+name: Build Multi-Platform Release (Windows, macOS, Linux)
+
+on:
+  push:
+    branches:
+      - main
+      - feature/standalone-exe
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows EXE
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Build Windows Executable
+        run: |
+          python -m PyInstaller MoCap2MMD.spec --noconfirm --clean
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MoCap2MMD-Windows-x64
+          path: dist/MoCap2MMD.exe
+
+  build-macos:
+    name: Build macOS DMG & App
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt pyinstaller pyobjc-framework-WebKit
+
+      - name: Build macOS App & DMG
+        run: |
+          chmod +x scripts/build_macos.sh
+          bash scripts/build_macos.sh
+
+      - name: Upload macOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: MoCap2MMD-macOS
+          path: |
+            dist/MoCap2MMD-macOS.dmg
+            dist/MoCap2MMD-macOS.zip
+
+  build-linux:
+    name: Build Linux AppImage
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install system WebKit and GTK libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            python3-gi \
+            python3-gi-cairo \
+            gir1.2-gtk-3.0 \
+            gir1.2-webkit2-4.1 \
+            libfuse2 \
+            wget \
+            file \
+            desktop-file-utils
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt pyinstaller pygobject
+
+      - name: Build Linux AppImage
+        run: |
+          chmod +x scripts/build_appimage.sh
+          bash scripts/build_appimage.sh
+
+      - name: Upload Linux AppImage Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MoCap2MMD-Linux-AppImage
+          path: dist/MoCap2MMD-x86_64.AppImage
+
+  release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish Release with Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/MoCap2MMD-Windows-x64/MoCap2MMD.exe
+            artifacts/MoCap2MMD-macOS/MoCap2MMD-macOS.dmg
+            artifacts/MoCap2MMD-macOS/MoCap2MMD-macOS.zip
+            artifacts/MoCap2MMD-Linux-AppImage/MoCap2MMD-x86_64.AppImage
+          draft: false
+          prerelease: false
