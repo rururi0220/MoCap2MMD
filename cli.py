@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--no-twist", action="store_true", help="Disable arm/hand twist bone separation")
     parser.add_argument("--no-fingers", action="store_true", help="Disable finger retargeting")
     parser.add_argument("--fps", type=float, default=30.0, help="Output framerate (default: 30.0)")
+    parser.add_argument("--root-rot-y", type=float, default=0.0, help="Rotate 全ての親 (root) bone around Y axis in degrees (default: 0.0)")
 
     args = parser.parse_args()
 
@@ -48,6 +49,7 @@ def main():
         enable_fingers=not args.no_fingers,
         scale_multiplier=args.scale,
         target_fps=args.fps,
+        root_rotation_y=args.root_rot_y,
     )
     retargeter = Retargeter(src, tgt, cfg)
     vmd = retargeter.retarget()

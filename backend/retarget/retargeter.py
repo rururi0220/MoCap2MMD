@@ -36,6 +36,7 @@ class RetargetConfig:
     auto_detect_a_pose: bool = True
     target_fps: float = 30.0
     smooth_sigma: float = 1.0
+    root_rotation_y: float = 0.0  # Orientation (yaw) rotation of 全ての親 in degrees
     overrides: dict[str, str] = field(default_factory=dict)
 
 
@@ -159,6 +160,16 @@ class Retargeter:
             self._compute_a_pose_offsets(ref_pos_lh, a_pose_offsets)
 
         # 5. Hips / Center / Root handling
+        root_pmx = self.tgt_map.get("root")
+        q_root = Rotation.from_euler("y", float(self.cfg.root_rotation_y), degrees=True).as_quat()
+
+        if root_pmx >= 0:
+            root_name = self.target.bones[root_pmx].name
+            tracks[root_name] = (
+                np.zeros((n_frames, 3)),
+                np.broadcast_to(q_root, (n_frames, 4)),
+            )
+
         hips_idx = self.src_map.get("hips")
         center_pmx = self.tgt_map.get("center")
 
@@ -171,6 +182,12 @@ class Retargeter:
             center_name = self.target.bones[center_pmx].name
             # In MMD, "センター" is the parent of both "下半身" (pelvis) and "上半身" (spine).
             # It carries both root translation AND overall body orientation.
+            # If no 全ての親 bone exists on target PMX, rotate center by root_rotation_y directly
+            if root_pmx < 0 and abs(self.cfg.root_rotation_y) > 1e-3:
+                R_y = Rotation.from_euler("y", float(self.cfg.root_rotation_y), degrees=True).as_matrix()
+                d_pos = np.einsum("ij,fj->fi", R_y, d_pos)
+                hips_delta_rot = np.einsum("ij,fjk->fik", R_y, hips_delta_rot)
+
             tracks[center_name] = (d_pos, mat_to_quat(hips_delta_rot))
 
             hips_pmx = self.tgt_map.get("hips")

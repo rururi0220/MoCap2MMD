@@ -161,6 +161,7 @@ class MoCapAPI:
                 auto_detect_a_pose=options.get("auto_detect_a_pose", True),
                 target_fps=float(options.get("target_fps", 30.0)),
                 smooth_sigma=float(options.get("smooth_sigma", 1.0)),
+                root_rotation_y=float(options.get("root_rotation_y", 0.0)),
                 overrides=options.get("overrides", {}),
             )
 
