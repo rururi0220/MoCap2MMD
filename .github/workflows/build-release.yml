@@ -4,10 +4,22 @@ on:
   push:
     branches:
       - main
-      - feature/standalone-exe
+      - 'feature/**'
+      - 'release/**'
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: 'Publish as GitHub Release'
+        required: false
+        type: boolean
+        default: true
+      tag_name:
+        description: 'Release Tag Name (e.g. v1.0.0)'
+        required: false
+        type: string
+        default: 'v1.0.0'
 
 permissions:
   contents: write
@@ -117,7 +129,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
     needs: [build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
     steps:
@@ -126,9 +138,33 @@ jobs:
         with:
           path: artifacts
 
+      - name: Determine Tag Name
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
       - name: Publish Release with Assets
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: MoCap2MMD ${{ steps.vars.outputs.tag }}
+          body: |
+            ## MoCap2MMD Multi-Platform Release
+
+            ### Downloads:
+            - **Windows**: `MoCap2MMD.exe` (Standalone 64-bit Executable)
+            - **macOS**: `MoCap2MMD-macOS.dmg` / `MoCap2MMD-macOS.zip` (Universal App Bundle)
+            - **Linux**: `MoCap2MMD-x86_64.AppImage` (Self-contained AppImage)
+
+            ### Features:
+            - FBX / BVH to MMD VMD Motion Retargeting.
+            - Real-time Three.js WebGL 3D preview with PMX model & motion rendering.
+            - Full leg & foot IK solving, twist bone separation, finger FK retargeting.
+            - Real-time "全ての親" root rotation and motion scale adjustments.
           files: |
             artifacts/MoCap2MMD-Windows-x64/MoCap2MMD.exe
             artifacts/MoCap2MMD-macOS/MoCap2MMD-macOS.dmg
