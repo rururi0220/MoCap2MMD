@@ -160,6 +160,7 @@ class MoCapAPI:
                 scale_multiplier=float(options.get("scale_multiplier", 1.0)),
                 auto_detect_a_pose=options.get("auto_detect_a_pose", True),
                 target_fps=float(options.get("target_fps", 30.0)),
+                smooth_sigma=float(options.get("smooth_sigma", 1.0)),
                 overrides=options.get("overrides", {}),
             )
 

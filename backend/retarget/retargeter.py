@@ -19,6 +19,9 @@ from .math_utils import (
     quat_make_continuous,
     resample_globals,
     swing_twist,
+    quat_mul,
+    smooth_quaternions,
+    smooth_positions,
 )
 from .ik_solver import forward_kinematics, solve_ik_offsets
 
@@ -31,6 +34,7 @@ class RetargetConfig:
     scale_multiplier: float = 1.0
     auto_detect_a_pose: bool = True
     target_fps: float = 30.0
+    smooth_sigma: float = 1.0
     overrides: dict[str, str] = field(default_factory=dict)
 
 
@@ -215,6 +219,10 @@ class Retargeter:
         frames_arr = np.arange(n_frames, dtype=int)
         for bname, (pos_arr, rot_quat) in tracks.items():
             rot_quat = quat_make_continuous(rot_quat)
+            if self.cfg.smooth_sigma > 0.0:
+                rot_quat = smooth_quaternions(rot_quat, sigma=self.cfg.smooth_sigma)
+                if np.any(np.abs(pos_arr) > 1e-6):
+                    pos_arr = smooth_positions(pos_arr, sigma=self.cfg.smooth_sigma)
             vmd.bones.append(
                 BoneTrack(
                     name=bname,
@@ -341,15 +349,42 @@ class Retargeter:
             if corr is not None:
                 ua_rot = ua_rot @ corr
 
-            tracks[self.target.bones[ua_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(ua_rot))
+            q_ua = mat_to_quat(ua_rot)
+            arm_twist_t = self.tgt_map.get(_key("armTwist", sd))
+            if self.cfg.enable_twist_bones and arm_twist_t >= 0:
+                ua_swing, ua_twist = swing_twist(q_ua, v_ua_rest)
+                tracks[self.target.bones[ua_t].name] = (np.zeros((n_frames, 3)), ua_swing)
+                tracks[self.target.bones[arm_twist_t].name] = (np.zeros((n_frames, 3)), ua_twist)
+            else:
+                tracks[self.target.bones[ua_t].name] = (np.zeros((n_frames, 3)), q_ua)
+                if arm_twist_t >= 0:
+                    tracks[self.target.bones[arm_twist_t].name] = (
+                        np.zeros((n_frames, 3)),
+                        mat_to_quat(np.broadcast_to(np.eye(3), (n_frames, 3, 3))),
+                    )
 
         # Lower Arm (Elbow)
+        la_twist = None
+        hand_twist_t = self.tgt_map.get(_key("handTwist", sd))
         if la_s >= 0 and la_t >= 0:
             p_la = self.source.parents[la_s]
             r_la_cur = np.linalg.inv(rot_lh[:, p_la]) @ rot_lh[:, la_s]
             r_la_ref = np.linalg.inv(ref_rot_lh[p_la]) @ ref_rot_lh[la_s]
             la_rot = r_la_cur @ np.linalg.inv(r_la_ref)
-            tracks[self.target.bones[la_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(la_rot))
+            q_la = mat_to_quat(la_rot)
+
+            # Decompose elbow rotation along forearm bone axis:
+            # The elbow is strictly a 1-DOF hinge joint: ZERO longitudinal roll/twist along the bone!
+            la_swing, la_twist = swing_twist(q_la, v_la_rest)
+            tracks[self.target.bones[la_t].name] = (np.zeros((n_frames, 3)), la_swing)
+
+            if self.cfg.enable_twist_bones and hand_twist_t >= 0:
+                tracks[self.target.bones[hand_twist_t].name] = (np.zeros((n_frames, 3)), la_twist)
+            elif hand_twist_t >= 0:
+                tracks[self.target.bones[hand_twist_t].name] = (
+                    np.zeros((n_frames, 3)),
+                    mat_to_quat(np.broadcast_to(np.eye(3), (n_frames, 3, 3))),
+                )
 
         # Hand (Wrist)
         if hd_s >= 0 and hd_t >= 0:
@@ -360,21 +395,14 @@ class Retargeter:
                 hd_rot = r_hd_cur @ np.linalg.inv(r_hd_ref)
             else:
                 hd_rot = np.broadcast_to(np.eye(3), (n_frames, 3, 3))
-            tracks[self.target.bones[hd_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(hd_rot))
+            q_hd = mat_to_quat(hd_rot)
 
-        # Lock twist bones to identity so they don't break the arm hierarchy
-        arm_twist_t = self.tgt_map.get(_key("armTwist", sd))
-        if arm_twist_t >= 0:
-            tracks[self.target.bones[arm_twist_t].name] = (
-                np.zeros((n_frames, 3)),
-                mat_to_quat(np.broadcast_to(np.eye(3), (n_frames, 3, 3))),
-            )
-        hand_twist_t = self.tgt_map.get(_key("handTwist", sd))
-        if hand_twist_t >= 0:
-            tracks[self.target.bones[hand_twist_t].name] = (
-                np.zeros((n_frames, 3)),
-                mat_to_quat(np.broadcast_to(np.eye(3), (n_frames, 3, 3))),
-            )
+            # If twist bone was NOT separated into handTwist, merge forearm twist into hand
+            # so the palm still faces the correct direction without twisting the elbow
+            if not (self.cfg.enable_twist_bones and hand_twist_t >= 0) and la_twist is not None:
+                q_hd = quat_mul(la_twist, q_hd)
+
+            tracks[self.target.bones[hd_t].name] = (np.zeros((n_frames, 3)), q_hd)
 
     def _retarget_leg(
         self,

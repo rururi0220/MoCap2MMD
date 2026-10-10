@@ -164,3 +164,28 @@ def resample_globals(rot: np.ndarray, pos: np.ndarray, src_fps: float, dst_fps: 
     q_out = quat_slerp(q[i0], q[i1], np.broadcast_to(w, q[i0].shape[:-1]))
     pos_out = pos[i0] * (1 - w[..., None]) + pos[i1] * w[..., None]
     return quat_to_mat(q_out), pos_out
+
+
+# ---------------------------------------------------------------------------
+# Trajectory smoothing
+# ---------------------------------------------------------------------------
+def smooth_quaternions(q: np.ndarray, sigma: float = 1.0) -> np.ndarray:
+    """Smooth quaternion trajectory along time axis using Gaussian filter to remove mocap jitter."""
+    if q.shape[0] < 3 or sigma <= 0.0:
+        return q
+    from scipy.ndimage import gaussian_filter1d
+
+    q_cont = quat_make_continuous(q)
+    q_smooth = gaussian_filter1d(q_cont, sigma=sigma, axis=0, mode="nearest")
+    norm = np.linalg.norm(q_smooth, axis=-1, keepdims=True)
+    return np.where(norm < 1e-9, q_cont, q_smooth / np.maximum(norm, 1e-12))
+
+
+def smooth_positions(pos: np.ndarray, sigma: float = 1.0) -> np.ndarray:
+    """Smooth position trajectory along time axis using Gaussian filter."""
+    if pos.shape[0] < 3 or sigma <= 0.0:
+        return pos
+    from scipy.ndimage import gaussian_filter1d
+
+    return gaussian_filter1d(pos, sigma=sigma, axis=0, mode="nearest")
+
