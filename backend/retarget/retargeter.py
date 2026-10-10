@@ -19,6 +19,10 @@ from .math_utils import (
     quat_make_continuous,
     resample_globals,
     swing_twist,
+    twist_swing,
+    quat_mul,
+    smooth_quaternions,
+    smooth_positions,
 )
 from .ik_solver import forward_kinematics, solve_ik_offsets
 
@@ -31,6 +35,8 @@ class RetargetConfig:
     scale_multiplier: float = 1.0
     auto_detect_a_pose: bool = True
     target_fps: float = 30.0
+    smooth_sigma: float = 1.0
+    root_rotation_y: float = 0.0  # Orientation (yaw) rotation of 全ての親 in degrees
     overrides: dict[str, str] = field(default_factory=dict)
 
 
@@ -42,20 +48,6 @@ class Retargeter:
         self.src_map: SourceMap = map_source(self.source, self.cfg.overrides)
         self.tgt_map: TargetMap = map_target(self.target)
 
-        # Detect inverted (Y-down) skeleton (common in optical/markerless mocap like Theia3D)
-        head_or_top = self.src_map.get("head")
-        if head_or_top < 0:
-            head_or_top = self.src_map.get("neck")
-        hips_idx = self.src_map.get("hips")
-        if head_or_top >= 0 and hips_idx >= 0:
-            up_vec = self.source.rest_pos[head_or_top] - self.source.rest_pos[hips_idx]
-            if up_vec[1] < -0.1:
-                # Apply 180-deg rotation around X axis: [x, y, z] -> [x, -y, -z] to keep right-handedness
-                RX_180 = np.array([[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], dtype=np.float64)
-                self.source.rest_pos = self.source.rest_pos @ RX_180.T
-                self.source.pos = self.source.pos @ RX_180.T
-                self.source.rest_rot = np.einsum("ab,jbc->jac", RX_180, self.source.rest_rot)
-                self.source.rot = np.einsum("ab,fjbc->fjac", RX_180, self.source.rot)
 
     def calculate_scale(self) -> float:
         """Calculate leg length ratio (target_leg / source_leg) to absorb stature differences."""
@@ -108,7 +100,7 @@ class Retargeter:
         if ua_l >= 0 and la_l >= 0 and n_frames > 0:
             v_rest = self.source.rest_pos[la_l] - self.source.rest_pos[ua_l]
             v_f0 = pos[0, la_l] - pos[0, ua_l]
-            if v_rest[1] < -0.1 and abs(v_f0[1]) < 0.15 and v_f0[0] > 0.05:
+            if v_rest[1] < -0.1 and abs(v_f0[1]) < 0.15 and abs(v_f0[0]) > 0.05:
                 use_frame0_as_ref = True
 
         if use_frame0_as_ref:
@@ -118,25 +110,68 @@ class Retargeter:
             ref_rot = self.source.rest_rot
             ref_pos = self.source.rest_pos
 
-        # 3. Coordinate conversion: Right-Handed (Source) to Left-Handed MMD (Target)
-        # R_lh = Mz @ R_rh @ Mz
-        # pos_lh = pos_rh * [1, 1, -1]
-        rot_lh = np.einsum("ia,fjab,bk->fjik", MIRROR_Z, rot, MIRROR_Z)
-        pos_lh = pos * np.array([1.0, 1.0, -1.0])
-        ref_rot_lh = np.einsum("ia,jab,bk->jik", MIRROR_Z, ref_rot, MIRROR_Z)
-        ref_pos_lh = ref_pos * np.array([1.0, 1.0, -1.0])
+        # 3. Coordinate conversion: Canonicalize source to Left-Handed MMD (Target)
+        # Determine axis alignment with MMD convention:
+        # X: Left is +X, Right is -X.
+        # Y: Up is +Y.
+        # Z: Front is -Z, Back is +Z.
+        sx, sy, sz = 1.0, 1.0, 1.0
+        # Check lateral axis (Left vs Right)
+        lt_s = self.src_map.get(_key("upperLeg", "L"))
+        rt_s = self.src_map.get(_key("upperLeg", "R"))
+        if lt_s < 0 or rt_s < 0:
+            lt_s = self.src_map.get(_key("upperArm", "L"))
+            rt_s = self.src_map.get(_key("upperArm", "R"))
+        if lt_s >= 0 and rt_s >= 0:
+            dx = ref_pos[lt_s, 0] - ref_pos[rt_s, 0]
+            if dx < -0.01:
+                sx = -1.0  # Left is -X in source; invert to match MMD +X
+
+        # Check vertical axis (Up vs Down)
+        hd_s = self.src_map.get("head")
+        hp_s = self.src_map.get("hips")
+        if hd_s >= 0 and hp_s >= 0:
+            dy = ref_pos[hd_s, 1] - ref_pos[hp_s, 1]
+            if dy < -0.05:
+                sy = -1.0  # Head is below hips; invert Y
+
+        # Check sagittal axis (Front vs Back)
+        to_s = self.src_map.get(_key("toes", "L"))
+        ft_s = self.src_map.get(_key("foot", "L"))
+        if to_s >= 0 and ft_s >= 0:
+            dz = ref_pos[to_s, 2] - ref_pos[ft_s, 2]
+            if dz > 0.01:
+                sz = -1.0  # Toes are in front (+Z in source); invert to match MMD front -Z
+        else:
+            # Fallback to standard Right-Handed to MMD conversion (flip Z)
+            sz = -1.0
+
+        M_conv = np.diag([sx, sy, sz])
+        pos_lh = pos * np.array([sx, sy, sz])
+        ref_pos_lh = ref_pos * np.array([sx, sy, sz])
+        rot_lh = np.einsum("ia,fjab,bk->fjik", M_conv, rot, M_conv)
+        ref_rot_lh = np.einsum("ia,jab,bk->jik", M_conv, ref_rot, M_conv)
 
         tracks: dict[str, tuple[np.ndarray, np.ndarray]] = {}  # bone_name -> (pos_array, rot_quat_array)
 
-        # 4. Rest pose offset analysis (A-pose to T-pose compensation if reference pose is in A-pose)
+        # 4. Rest pose offset analysis (A-pose to T-pose compensation)
         a_pose_offsets: dict[str, np.ndarray] = {}
-        if self.cfg.auto_detect_a_pose and not use_frame0_as_ref:
+        if self.cfg.auto_detect_a_pose:
             self._compute_a_pose_offsets(ref_pos_lh, a_pose_offsets)
 
         # 5. Hips / Center / Root handling
+        root_pmx = self.tgt_map.get("root")
+        q_root = Rotation.from_euler("y", float(self.cfg.root_rotation_y), degrees=True).as_quat()
+
+        if root_pmx >= 0:
+            root_name = self.target.bones[root_pmx].name
+            tracks[root_name] = (
+                np.zeros((n_frames, 3)),
+                np.broadcast_to(q_root, (n_frames, 4)),
+            )
+
         hips_idx = self.src_map.get("hips")
         center_pmx = self.tgt_map.get("center")
-        groove_pmx = self.tgt_map.get("groove")
 
         if hips_idx >= 0 and center_pmx >= 0:
             # Root displacement scaled to PMX stature
@@ -145,36 +180,52 @@ class Retargeter:
             hips_delta_rot = rot_lh[:, hips_idx] @ np.linalg.inv(ref_rot_lh[hips_idx])
 
             center_name = self.target.bones[center_pmx].name
-            # In MMD, "センター" usually carries position + rotation, or position only if "下半身" takes rotation
+            # In MMD, "センター" is the parent of both "下半身" (pelvis) and "上半身" (spine).
+            # It carries both root translation AND overall body orientation.
+            # If no 全ての親 bone exists on target PMX, rotate center by root_rotation_y directly
+            if root_pmx < 0 and abs(self.cfg.root_rotation_y) > 1e-3:
+                R_y = Rotation.from_euler("y", float(self.cfg.root_rotation_y), degrees=True).as_matrix()
+                d_pos = np.einsum("ij,fj->fi", R_y, d_pos)
+                hips_delta_rot = np.einsum("ij,fjk->fik", R_y, hips_delta_rot)
+
+            tracks[center_name] = (d_pos, mat_to_quat(hips_delta_rot))
+
             hips_pmx = self.tgt_map.get("hips")
             if hips_pmx >= 0:
-                tracks[center_name] = (d_pos, mat_to_quat(np.broadcast_to(np.eye(3), (n_frames, 3, 3))))
                 hips_name = self.target.bones[hips_pmx].name
-                tracks[hips_name] = (np.zeros((n_frames, 3)), mat_to_quat(hips_delta_rot))
-            else:
-                tracks[center_name] = (d_pos, mat_to_quat(hips_delta_rot))
+                # 下半身 stays at identity (aligned with センター)
+                tracks[hips_name] = (np.zeros((n_frames, 3)), mat_to_quat(np.broadcast_to(np.eye(3), (n_frames, 3, 3))))
 
         # 6. Spine chain distribution
         self._retarget_spine(rot_lh, ref_rot_lh, n_frames, tracks)
 
         # 7. Head & Neck
-        for sem in ("neck", "head"):
-            s_idx = self.src_map.get(sem)
-            t_idx = self.tgt_map.get(sem)
-            if s_idx >= 0 and t_idx >= 0:
-                p_s = self.source.parents[s_idx]
-                if p_s >= 0:
-                    r_cur = np.linalg.inv(rot_lh[:, p_s]) @ rot_lh[:, s_idx]
-                    r_ref = np.linalg.inv(ref_rot_lh[p_s]) @ ref_rot_lh[s_idx]
-                    local_r = r_cur @ np.linalg.inv(r_ref)
-                else:
-                    local_r = rot_lh[:, s_idx] @ np.linalg.inv(ref_rot_lh[s_idx])
-                bname = self.target.bones[t_idx].name
-                tracks[bname] = (np.zeros((n_frames, 3)), mat_to_quat(local_r))
+        thorax_s = self.src_map.spine[-1] if self.src_map.spine else self.src_map.get("hips")
+        neck_s = self.src_map.get("neck")
+        head_s = self.src_map.get("head")
+
+        neck_t = self.tgt_map.get("neck")
+        head_t = self.tgt_map.get("head")
+
+        if neck_s >= 0 and neck_t >= 0 and thorax_s >= 0:
+            rel_cur = np.linalg.inv(rot_lh[:, thorax_s]) @ rot_lh[:, neck_s]
+            rel_ref = np.linalg.inv(ref_rot_lh[thorax_s]) @ ref_rot_lh[neck_s]
+            neck_rot = rel_cur @ np.linalg.inv(rel_ref)
+            tracks[self.target.bones[neck_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(neck_rot))
+
+        if head_s >= 0 and head_t >= 0:
+            parent_s = neck_s if neck_s >= 0 else thorax_s
+            if parent_s >= 0:
+                rel_cur = np.linalg.inv(rot_lh[:, parent_s]) @ rot_lh[:, head_s]
+                rel_ref = np.linalg.inv(ref_rot_lh[parent_s]) @ ref_rot_lh[head_s]
+                head_rot = rel_cur @ np.linalg.inv(rel_ref)
+            else:
+                head_rot = rot_lh[:, head_s] @ np.linalg.inv(ref_rot_lh[head_s])
+            tracks[self.target.bones[head_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(head_rot))
 
         # 8. Arms and Limbs
         for sd in SIDES:
-            self._retarget_arm(sd, rot_lh, ref_rot_lh, a_pose_offsets, n_frames, tracks)
+            self._retarget_arm(sd, rot_lh, ref_rot_lh, pos_lh, ref_pos_lh, a_pose_offsets, n_frames, tracks)
             self._retarget_leg(sd, rot_lh, ref_rot_lh, pos_lh, ref_pos_lh, scale, n_frames, tracks)
 
         # 9. Fingers
@@ -186,6 +237,10 @@ class Retargeter:
         frames_arr = np.arange(n_frames, dtype=int)
         for bname, (pos_arr, rot_quat) in tracks.items():
             rot_quat = quat_make_continuous(rot_quat)
+            if self.cfg.smooth_sigma > 0.0:
+                rot_quat = smooth_quaternions(rot_quat, sigma=self.cfg.smooth_sigma)
+                if np.any(np.abs(pos_arr) > 1e-6):
+                    pos_arr = smooth_positions(pos_arr, sigma=self.cfg.smooth_sigma)
             vmd.bones.append(
                 BoneTrack(
                     name=bname,
@@ -209,34 +264,41 @@ class Retargeter:
         return vmd
 
     def _compute_a_pose_offsets(self, ref_pos_lh: np.ndarray, out_offsets: dict[str, np.ndarray]):
-        """Detect A-pose in upper arms and compute compensation to T-pose (horizontal)."""
+        """Detect A-pose in target PMX model vs source reference pose and compute compensation."""
         for sd in SIDES:
-            ua = self.src_map.get(_key("upperArm", sd))
-            la = self.src_map.get(_key("lowerArm", sd))
-            if ua >= 0 and la >= 0:
-                v_src = normalize(ref_pos_lh[la] - ref_pos_lh[ua])
-                # Target T-pose arm vector in MMD: Left arm goes +X [1, 0, 0], Right arm goes -X [-1, 0, 0]
-                v_tgt = np.array([1.0 if sd == "L" else -1.0, 0.0, 0.0])
-                # Check if arm is pointing downward (A-pose: Y < -0.15)
-                if v_src[1] < -0.15:
-                    # Rotation to orient MMD horizontal arm down to source rest arm direction
+            ua_s = self.src_map.get(_key("upperArm", sd))
+            la_s = self.src_map.get(_key("lowerArm", sd))
+            ua_t = self.tgt_map.get(_key("upperArm", sd))
+            la_t = self.tgt_map.get(_key("lowerArm", sd))
+            if ua_s >= 0 and la_s >= 0 and ua_t >= 0 and la_t >= 0:
+                p_ua_t = self.target.bones[ua_t].position
+                p_la_t = self.target.bones[la_t].position
+                v_tgt = normalize(p_la_t - p_ua_t)
+                v_src = normalize(ref_pos_lh[la_s] - ref_pos_lh[ua_s])
+                if np.linalg.norm(v_tgt - v_src) > 0.05:
                     r_corr = rotation_between(v_tgt, v_src)
                     out_offsets[_key("upperArm", sd)] = r_corr
 
     def _retarget_spine(self, rot_lh: np.ndarray, ref_rot_lh: np.ndarray, n_frames: int, tracks: dict):
         """Distribute source spine rotation across PMX 上半身 and 上半身2."""
+        hips_s = self.src_map.get("hips")
         spine_joints = self.src_map.spine
-        tgt_spines = self.tgt_map.spine  # list of PMX bone indices: [上半身, 上半身2, ...]
+        tgt_spines = self.tgt_map.spine
 
         if not tgt_spines:
             return
 
-        if spine_joints:
-            top_spine = spine_joints[-1]
-            p_top = self.source.parents[top_spine]
-            r_cur = np.linalg.inv(rot_lh[:, p_top]) @ rot_lh[:, top_spine]
-            r_ref = np.linalg.inv(ref_rot_lh[p_top]) @ ref_rot_lh[top_spine]
-            total_spine_rot = r_cur @ np.linalg.inv(r_ref)
+        top_s = spine_joints[-1] if spine_joints else -1
+
+        if top_s >= 0 and hips_s >= 0:
+            rel_cur = np.linalg.inv(rot_lh[:, hips_s]) @ rot_lh[:, top_s]
+            rel_ref = np.linalg.inv(ref_rot_lh[hips_s]) @ ref_rot_lh[top_s]
+            total_spine_rot = rel_cur @ np.linalg.inv(rel_ref)
+        elif top_s >= 0:
+            p_top = self.source.parents[top_s]
+            rel_cur = np.linalg.inv(rot_lh[:, p_top]) @ rot_lh[:, top_s]
+            rel_ref = np.linalg.inv(ref_rot_lh[p_top]) @ ref_rot_lh[top_s]
+            total_spine_rot = rel_cur @ np.linalg.inv(rel_ref)
         else:
             total_spine_rot = np.broadcast_to(np.eye(3), (n_frames, 3, 3))
 
@@ -244,7 +306,6 @@ class Retargeter:
             bname = self.target.bones[tgt_spines[0]].name
             tracks[bname] = (np.zeros((n_frames, 3)), mat_to_quat(total_spine_rot))
         else:
-            # Distribute 50% / 50% using slerp of quaternion
             q_tot = mat_to_quat(total_spine_rot)
             q_half = Rotation.from_quat(q_tot).as_rotvec() * 0.5
             q_half_quat = Rotation.from_rotvec(q_half).as_quat()
@@ -259,11 +320,13 @@ class Retargeter:
         sd: str,
         rot_lh: np.ndarray,
         ref_rot_lh: np.ndarray,
+        pos_lh: np.ndarray,
+        ref_pos_lh: np.ndarray,
         a_pose_offsets: dict,
         n_frames: int,
         tracks: dict,
     ):
-        """Retarget Shoulder, UpperArm, LowerArm, Hand with Swing-Twist decomposition."""
+        """Retarget Shoulder, UpperArm, LowerArm, Hand using 3D joint direction vectors."""
         sh_s = self.src_map.get(_key("shoulder", sd))
         ua_s = self.src_map.get(_key("upperArm", sd))
         la_s = self.src_map.get(_key("lowerArm", sd))
@@ -274,15 +337,25 @@ class Retargeter:
         la_t = self.tgt_map.get(_key("lowerArm", sd))
         hd_t = self.tgt_map.get(_key("hand", sd))
 
+        # Rest vectors of target PMX model
+        if ua_t >= 0 and la_t >= 0:
+            v_ua_rest = normalize(self.target.bones[la_t].position - self.target.bones[ua_t].position)
+        else:
+            v_ua_rest = np.array([1.0 if sd == "L" else -1.0, 0.0, 0.0])
+
+        if la_t >= 0 and hd_t >= 0:
+            v_la_rest = normalize(self.target.bones[hd_t].position - self.target.bones[la_t].position)
+        else:
+            v_la_rest = v_ua_rest
+
         # Shoulder
         if sh_s >= 0 and sh_t >= 0:
             p = self.source.parents[sh_s]
             r_cur = np.linalg.inv(rot_lh[:, p]) @ rot_lh[:, sh_s]
             r_ref = np.linalg.inv(ref_rot_lh[p]) @ ref_rot_lh[sh_s]
-            sh_rot = r_cur @ np.linalg.inv(r_ref)
-            tracks[self.target.bones[sh_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(sh_rot))
+            tracks[self.target.bones[sh_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(r_cur @ np.linalg.inv(r_ref)))
 
-        # Upper Arm with A-pose offset and optional Twist separation
+        # Upper Arm
         if ua_s >= 0 and ua_t >= 0:
             p = self.source.parents[ua_s]
             r_cur = np.linalg.inv(rot_lh[:, p]) @ rot_lh[:, ua_s]
@@ -294,41 +367,64 @@ class Retargeter:
             if corr is not None:
                 ua_rot = ua_rot @ corr
 
+            q_ua = mat_to_quat(ua_rot)
             arm_twist_t = self.tgt_map.get(_key("armTwist", sd))
             if self.cfg.enable_twist_bones and arm_twist_t >= 0:
-                # Decompose rotation along bone axis: X-axis ([1, 0, 0] or [-1, 0, 0])
-                axis = np.array([1.0 if sd == "L" else -1.0, 0.0, 0.0])
-                q_all = mat_to_quat(ua_rot)
-                q_swing, q_twist = swing_twist(q_all, axis)
-                tracks[self.target.bones[ua_t].name] = (np.zeros((n_frames, 3)), q_swing)
-                tracks[self.target.bones[arm_twist_t].name] = (np.zeros((n_frames, 3)), q_twist)
+                ua_swing, ua_twist = swing_twist(q_ua, v_ua_rest)
+                tracks[self.target.bones[ua_t].name] = (np.zeros((n_frames, 3)), ua_swing)
+                tracks[self.target.bones[arm_twist_t].name] = (np.zeros((n_frames, 3)), ua_twist)
             else:
-                tracks[self.target.bones[ua_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(ua_rot))
+                tracks[self.target.bones[ua_t].name] = (np.zeros((n_frames, 3)), q_ua)
+                if arm_twist_t >= 0:
+                    tracks[self.target.bones[arm_twist_t].name] = (
+                        np.zeros((n_frames, 3)),
+                        mat_to_quat(np.broadcast_to(np.eye(3), (n_frames, 3, 3))),
+                    )
 
-        # Lower Arm (Elbow)
-        if la_s >= 0 and la_t >= 0:
-            p = self.source.parents[la_s]
-            r_cur = np.linalg.inv(rot_lh[:, p]) @ rot_lh[:, la_s]
-            r_ref = np.linalg.inv(ref_rot_lh[p]) @ ref_rot_lh[la_s]
-            la_rot = r_cur @ np.linalg.inv(r_ref)
-            tracks[self.target.bones[la_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(la_rot))
+        # Lower Arm (Elbow):
+        # The elbow is strictly a 1-DOF hinge joint:
+        # It aims the forearm from the upper arm's current direction to the wrist's 3D position.
+        # It has ZERO longitudinal roll/twist along the bone!
+        if la_s >= 0 and la_t >= 0 and ua_s >= 0:
+            if hd_s >= 0:
+                u_la = normalize(pos_lh[:, hd_s] - pos_lh[:, la_s])
+            else:
+                u_la = np.einsum("fij,j->fi", rot_lh[:, la_s], np.array([0.0, 1.0, 0.0]))
 
-        # Hand (Wrist)
-        if hd_s >= 0 and hd_t >= 0:
-            p = self.source.parents[hd_s]
-            r_cur = np.linalg.inv(rot_lh[:, p]) @ rot_lh[:, hd_s]
-            r_ref = np.linalg.inv(ref_rot_lh[p]) @ ref_rot_lh[hd_s]
-            hd_rot = r_cur @ np.linalg.inv(r_ref)
+            delta_ua = rot_lh[:, ua_s] @ np.linalg.inv(ref_rot_lh[ua_s])
+            w = np.einsum("fji,fj->fi", delta_ua, u_la)
 
+            R_la = np.empty((n_frames, 3, 3))
+            for f in range(n_frames):
+                R_la[f] = rotation_between(v_la_rest, w[f])
+
+            tracks[self.target.bones[la_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(R_la))
+
+            # Hand (Wrist) & HandTwist:
+            # Match the mocap actor's hand world orientation in space
             hand_twist_t = self.tgt_map.get(_key("handTwist", sd))
-            if self.cfg.enable_twist_bones and hand_twist_t >= 0:
-                axis = np.array([1.0 if sd == "L" else -1.0, 0.0, 0.0])
-                q_all = mat_to_quat(hd_rot)
-                q_swing, q_twist = swing_twist(q_all, axis)
-                tracks[self.target.bones[hd_t].name] = (np.zeros((n_frames, 3)), q_swing)
-                tracks[self.target.bones[hand_twist_t].name] = (np.zeros((n_frames, 3)), q_twist)
-            else:
-                tracks[self.target.bones[hd_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(hd_rot))
+            if hd_s >= 0 and hd_t >= 0:
+                delta_hd = rot_lh[:, hd_s] @ np.linalg.inv(ref_rot_lh[hd_s])
+                R_la_world = delta_ua @ R_la
+                R_hd_local = np.linalg.inv(R_la_world) @ delta_hd
+                q_hd = mat_to_quat(R_hd_local)
+
+                # In PMX: handTwist is the parent of hand.
+                # Decompose q_hd = twist * swing along the forearm rest axis:
+                # - q_hd_twist is the forearm pronation/supination (evaluated first)
+                # - q_hd_swing is the wrist flexion/pitch/yaw (evaluated second)
+                q_hd_twist, q_hd_swing = twist_swing(q_hd, v_la_rest)
+
+                if self.cfg.enable_twist_bones and hand_twist_t >= 0:
+                    tracks[self.target.bones[hand_twist_t].name] = (np.zeros((n_frames, 3)), q_hd_twist)
+                    tracks[self.target.bones[hd_t].name] = (np.zeros((n_frames, 3)), q_hd_swing)
+                else:
+                    tracks[self.target.bones[hd_t].name] = (np.zeros((n_frames, 3)), q_hd)
+                    if hand_twist_t >= 0:
+                        tracks[self.target.bones[hand_twist_t].name] = (
+                            np.zeros((n_frames, 3)),
+                            mat_to_quat(np.broadcast_to(np.eye(3), (n_frames, 3, 3))),
+                        )
 
     def _retarget_leg(
         self,
@@ -341,7 +437,7 @@ class Retargeter:
         n_frames: int,
         tracks: dict,
     ):
-        """Retarget Leg: either generate Foot IK / Toe IK or output FK rotations."""
+        """Retarget Leg: anatomical FK bone orientations and FK-derived Foot IK target."""
         ul_s = self.src_map.get(_key("upperLeg", sd))
         ll_s = self.src_map.get(_key("lowerLeg", sd))
         ft_s = self.src_map.get(_key("foot", sd))
@@ -355,62 +451,74 @@ class Retargeter:
         leg_ik_t = self.tgt_map.get(_key("legIK", sd))
         toe_ik_t = self.tgt_map.get(_key("toeIK", sd))
 
-        if self.cfg.enable_foot_ik and leg_ik_t >= 0 and ft_s >= 0:
-            # --- Foot IK Generation ---
-            # Foot displacement from reference standing pose scaled to target stature
-            leg_ik_pos = (pos_lh[:, ft_s] - ref_pos_lh[ft_s]) * scale
+        if ul_s >= 0 and ll_s >= 0 and ft_s >= 0 and ul_t >= 0 and ll_t >= 0 and ft_t >= 0:
+            # 1. Thigh relative rotation from pelvis
+            p_thigh = self.source.parents[ul_s]
+            r_cur = np.linalg.inv(rot_lh[:, p_thigh]) @ rot_lh[:, ul_s]
+            r_ref = np.linalg.inv(ref_rot_lh[p_thigh]) @ ref_rot_lh[ul_s]
+            r_thigh = r_cur @ np.linalg.inv(r_ref)
 
-            # Foot rotation from source foot
-            p_ft = self.source.parents[ft_s]
-            r_cur = np.linalg.inv(rot_lh[:, p_ft]) @ rot_lh[:, ft_s]
-            r_ref = np.linalg.inv(ref_rot_lh[p_ft]) @ ref_rot_lh[ft_s]
-            ft_rot = r_cur @ np.linalg.inv(r_ref)
+            # 2. Knee relative rotation from thigh
+            p_knee = self.source.parents[ll_s]
+            r_cur = np.linalg.inv(rot_lh[:, p_knee]) @ rot_lh[:, ll_s]
+            r_ref = np.linalg.inv(ref_rot_lh[p_knee]) @ ref_rot_lh[ll_s]
+            r_knee = r_cur @ np.linalg.inv(r_ref)
 
-            tracks[self.target.bones[leg_ik_t].name] = (leg_ik_pos, mat_to_quat(ft_rot))
+            # 3. Foot relative rotation from knee
+            p_foot = self.source.parents[ft_s]
+            r_cur = np.linalg.inv(rot_lh[:, p_foot]) @ rot_lh[:, ft_s]
+            r_ref = np.linalg.inv(ref_rot_lh[p_foot]) @ ref_rot_lh[ft_s]
+            r_foot = r_cur @ np.linalg.inv(r_ref)
 
-            # Toe IK
-            if toe_ik_t >= 0 and to_s >= 0:
-                toe_ik_pos = (pos_lh[:, to_s] - ref_pos_lh[to_s]) * scale
-                tracks[self.target.bones[toe_ik_t].name] = (
-                    toe_ik_pos,
-                    mat_to_quat(np.broadcast_to(np.eye(3), (n_frames, 3, 3))),
-                )
+            # Always populate FK leg tracks with anatomical relative rotations
+            tracks[self.target.bones[ul_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(r_thigh))
+            tracks[self.target.bones[ll_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(r_knee))
+            tracks[self.target.bones[ft_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(r_foot))
 
-            # When foot IK is enabled, FK leg bones (足, ひざ) keep zero rotation
-            if ul_t >= 0:
-                tracks[self.target.bones[ul_t].name] = (
-                    np.zeros((n_frames, 3)),
-                    mat_to_quat(np.broadcast_to(np.eye(3), (n_frames, 3, 3))),
-                )
-            if ll_t >= 0:
-                tracks[self.target.bones[ll_t].name] = (
-                    np.zeros((n_frames, 3)),
-                    mat_to_quat(np.broadcast_to(np.eye(3), (n_frames, 3, 3))),
-                )
-            if ft_t >= 0:
-                tracks[self.target.bones[ft_t].name] = (
-                    np.zeros((n_frames, 3)),
-                    mat_to_quat(np.broadcast_to(np.eye(3), (n_frames, 3, 3))),
-                )
-        else:
-            # --- FK Leg Fallback ---
-            if ul_s >= 0 and ul_t >= 0:
-                p = self.source.parents[ul_s]
-                r_cur = np.linalg.inv(rot_lh[:, p]) @ rot_lh[:, ul_s]
-                r_ref = np.linalg.inv(ref_rot_lh[p]) @ ref_rot_lh[ul_s]
-                tracks[self.target.bones[ul_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(r_cur @ np.linalg.inv(r_ref)))
+            # 4. Foot IK target placed at the exact FK foot reach
+            if self.cfg.enable_foot_ik and leg_ik_t >= 0:
+                p_ul = self.target.bones[ul_t].position
+                p_ll = self.target.bones[ll_t].position
+                p_ft = self.target.bones[ft_t].position
+                p_ik = self.target.bones[leg_ik_t].position
 
-            if ll_s >= 0 and ll_t >= 0:
-                p = self.source.parents[ll_s]
-                r_cur = np.linalg.inv(rot_lh[:, p]) @ rot_lh[:, ll_s]
-                r_ref = np.linalg.inv(ref_rot_lh[p]) @ ref_rot_lh[ll_s]
-                tracks[self.target.bones[ll_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(r_cur @ np.linalg.inv(r_ref)))
+                v_thigh_rest = p_ll - p_ul
+                v_shin_rest = p_ft - p_ll
 
-            if ft_s >= 0 and ft_t >= 0:
-                p = self.source.parents[ft_s]
-                r_cur = np.linalg.inv(rot_lh[:, p]) @ rot_lh[:, ft_s]
-                r_ref = np.linalg.inv(ref_rot_lh[p]) @ ref_rot_lh[ft_s]
-                tracks[self.target.bones[ft_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(r_cur @ np.linalg.inv(r_ref)))
+                v_thigh = np.einsum("fij,j->fi", r_thigh, v_thigh_rest)
+                r_knee_world = r_thigh @ r_knee
+                v_shin = np.einsum("fij,j->fi", r_knee_world, v_shin_rest)
+                r_foot_rel = v_thigh + v_shin
+
+                center_pmx = self.tgt_map.get("center")
+                center_name = self.target.bones[center_pmx].name if center_pmx >= 0 else None
+                R_center = quat_to_mat(tracks[center_name][1]) if center_name and center_name in tracks else np.broadcast_to(np.eye(3), (n_frames, 3, 3))
+                p_center_rest = self.target.bones[center_pmx].position if center_pmx >= 0 else np.zeros(3)
+                c_pos = tracks[center_name][0] if center_name and center_name in tracks else np.zeros((n_frames, 3))
+
+                # Hip world position
+                p_hip_world = p_center_rest + c_pos + np.einsum("fij,j->fi", R_center, (p_ul - p_center_rest))
+
+                # Natural FK foot target in world space
+                p_ik_world = p_hip_world + np.einsum("fij,fj->fi", R_center, r_foot_rel)
+                leg_ik_pos = p_ik_world - p_ik
+
+                # Foot world orientation with zero sideways roll
+                ft_rot = rot_lh[:, ft_s] @ np.linalg.inv(ref_rot_lh[ft_s])
+                v_fwd = ft_rot @ np.array([0.0, 0.0, -1.0])
+                yaw = np.arctan2(-v_fwd[:, 0], -v_fwd[:, 2])
+                pitch = np.arcsin(np.clip(-v_fwd[:, 1], -1.0, 1.0))
+                eulers = np.stack([yaw, pitch, np.zeros_like(yaw)], axis=-1)
+                ft_quat = Rotation.from_euler("yxz", eulers, degrees=False).as_quat()
+
+                tracks[self.target.bones[leg_ik_t].name] = (leg_ik_pos, ft_quat)
+
+                if toe_ik_t >= 0:
+                    tracks[self.target.bones[toe_ik_t].name] = (
+                        np.zeros((n_frames, 3)),
+                        mat_to_quat(np.broadcast_to(np.eye(3), (n_frames, 3, 3))),
+                    )
+
 
     def _retarget_fingers(self, rot_lh: np.ndarray, ref_rot_lh: np.ndarray, n_frames: int, tracks: dict):
         """Retarget finger joints (Thumb, Index, Middle, Ring, Little) 1 to 3."""

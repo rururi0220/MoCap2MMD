@@ -32,6 +32,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const sliderScale = document.getElementById("slider-scale");
   const valScale = document.getElementById("val-scale");
+  const sliderRootRot = document.getElementById("slider-root-rot");
+  const valRootRot = document.getElementById("val-root-rot");
+  const rootRotChips = document.querySelectorAll(".preset-chip-row .btn-chip");
   const chkIK = document.getElementById("chk-ik");
   const chkTwist = document.getElementById("chk-twist");
   const chkFingers = document.getElementById("chk-fingers");
@@ -56,6 +59,41 @@ document.addEventListener("DOMContentLoaded", () => {
   sliderScale.addEventListener("input", (e) => {
     valScale.textContent = `${parseFloat(e.target.value).toFixed(2)}x`;
   });
+
+  // Root rotation display & presets
+  function setRootRotation(angle) {
+    if (!sliderRootRot || !valRootRot) return;
+    sliderRootRot.value = angle;
+    valRootRot.textContent = `${angle}°`;
+    rootRotChips.forEach((btn) => {
+      if (parseFloat(btn.dataset.angle) === angle) {
+        btn.classList.add("active");
+      } else {
+        btn.classList.remove("active");
+      }
+    });
+  }
+
+  if (sliderRootRot && valRootRot) {
+    sliderRootRot.addEventListener("input", (e) => {
+      const val = parseFloat(e.target.value);
+      valRootRot.textContent = `${val}°`;
+      rootRotChips.forEach((btn) => {
+        if (parseFloat(btn.dataset.angle) === val) {
+          btn.classList.add("active");
+        } else {
+          btn.classList.remove("active");
+        }
+      });
+    });
+
+    rootRotChips.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const angle = parseFloat(btn.dataset.angle);
+        setRootRotation(angle);
+      });
+    });
+  }
 
   // Source selection
   sourceDropzone.addEventListener("click", async () => {
@@ -139,6 +177,7 @@ document.addEventListener("DOMContentLoaded", () => {
       enable_twist_bones: chkTwist.checked,
       enable_fingers: chkFingers.checked,
       scale_multiplier: parseFloat(sliderScale.value),
+      root_rotation_y: parseFloat(sliderRootRot ? sliderRootRot.value : 0),
       auto_detect_a_pose: chkAPose.checked,
       target_fps: 30.0,
       overrides: {},

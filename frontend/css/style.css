@@ -485,3 +485,37 @@ input:checked + .slider:before {
   color: var(--accent-cyan);
   font-family: monospace;
 }
+
+/* Preset Chips */
+.preset-chip-row {
+  display: flex;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.btn-chip {
+  flex: 1;
+  background: var(--bg-surface-elevated);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 3px 0;
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-align: center;
+}
+
+.btn-chip:hover {
+  background: #32384e;
+  color: var(--text-primary);
+  border-color: var(--accent-cyan);
+}
+
+.btn-chip.active {
+  background: rgba(0, 229, 255, 0.15);
+  color: var(--accent-cyan);
+  border-color: var(--accent-cyan);
+  font-weight: 600;
+}
+

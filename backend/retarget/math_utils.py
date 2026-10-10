@@ -131,6 +131,26 @@ def swing_twist(q: np.ndarray, axis: np.ndarray):
     return swing, twist
 
 
+def twist_swing(q: np.ndarray, axis: np.ndarray):
+    """Decompose ``q = twist * swing`` where ``twist`` rotates around ``axis``.
+
+    Returns ``(twist, swing)`` quaternions.
+    """
+    axis = normalize(np.asarray(axis, dtype=np.float64))
+    v = q[..., :3]
+    proj = np.sum(v * axis, axis=-1, keepdims=True) * axis
+    twist = np.concatenate([proj, q[..., 3:4]], axis=-1)
+    n = np.linalg.norm(twist, axis=-1, keepdims=True)
+    identity = np.zeros_like(twist)
+    identity[..., 3] = 1.0
+    twist = np.where(n < 1e-9, identity, twist / np.maximum(n, 1e-12))
+    # swing = twist^-1 * q
+    tw_inv = twist * np.array([-1.0, -1.0, -1.0, 1.0])
+    swing = quat_mul(tw_inv, q)
+    return twist, swing
+
+
+
 def quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     ax, ay, az, aw = np.moveaxis(a, -1, 0)
     bx, by, bz, bw = np.moveaxis(b, -1, 0)
@@ -164,3 +184,28 @@ def resample_globals(rot: np.ndarray, pos: np.ndarray, src_fps: float, dst_fps: 
     q_out = quat_slerp(q[i0], q[i1], np.broadcast_to(w, q[i0].shape[:-1]))
     pos_out = pos[i0] * (1 - w[..., None]) + pos[i1] * w[..., None]
     return quat_to_mat(q_out), pos_out
+
+
+# ---------------------------------------------------------------------------
+# Trajectory smoothing
+# ---------------------------------------------------------------------------
+def smooth_quaternions(q: np.ndarray, sigma: float = 1.0) -> np.ndarray:
+    """Smooth quaternion trajectory along time axis using Gaussian filter to remove mocap jitter."""
+    if q.shape[0] < 3 or sigma <= 0.0:
+        return q
+    from scipy.ndimage import gaussian_filter1d
+
+    q_cont = quat_make_continuous(q)
+    q_smooth = gaussian_filter1d(q_cont, sigma=sigma, axis=0, mode="nearest")
+    norm = np.linalg.norm(q_smooth, axis=-1, keepdims=True)
+    return np.where(norm < 1e-9, q_cont, q_smooth / np.maximum(norm, 1e-12))
+
+
+def smooth_positions(pos: np.ndarray, sigma: float = 1.0) -> np.ndarray:
+    """Smooth position trajectory along time axis using Gaussian filter."""
+    if pos.shape[0] < 3 or sigma <= 0.0:
+        return pos
+    from scipy.ndimage import gaussian_filter1d
+
+    return gaussian_filter1d(pos, sigma=sigma, axis=0, mode="nearest")
+

@@ -150,8 +150,20 @@ class MoCapAPI:
             if not self._cached_source or not self._cached_target:
                 return {"success": False, "error": "Source motion or PMX model not loaded"}
 
-            _, src = self._cached_source
-            _, tgt = self._cached_target
+            path_src, _ = self._cached_source
+            path_tgt, _ = self._cached_target
+
+            # Always reload fresh source motion from original file
+            ext = os.path.splitext(path_src)[1].lower()
+            if ext == ".bvh":
+                src = parse_bvh(path_src)
+            elif ext == ".fbx":
+                src = parse_fbx(path_src)
+            else:
+                return {"success": False, "error": f"Unsupported format: {ext}"}
+
+            # Always reload fresh PMX target model from original file
+            tgt = load_pmx(path_tgt)
 
             cfg = RetargetConfig(
                 enable_foot_ik=options.get("enable_foot_ik", True),
@@ -160,6 +172,8 @@ class MoCapAPI:
                 scale_multiplier=float(options.get("scale_multiplier", 1.0)),
                 auto_detect_a_pose=options.get("auto_detect_a_pose", True),
                 target_fps=float(options.get("target_fps", 30.0)),
+                smooth_sigma=float(options.get("smooth_sigma", 1.0)),
+                root_rotation_y=float(options.get("root_rotation_y", 0.0)),
                 overrides=options.get("overrides", {}),
             )
 
