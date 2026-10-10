@@ -148,9 +148,9 @@ class Retargeter:
 
         tracks: dict[str, tuple[np.ndarray, np.ndarray]] = {}  # bone_name -> (pos_array, rot_quat_array)
 
-        # 4. Rest pose offset analysis (A-pose to T-pose compensation if reference pose is in A-pose)
+        # 4. Rest pose offset analysis (A-pose to T-pose compensation)
         a_pose_offsets: dict[str, np.ndarray] = {}
-        if self.cfg.auto_detect_a_pose and not use_frame0_as_ref:
+        if self.cfg.auto_detect_a_pose:
             self._compute_a_pose_offsets(ref_pos_lh, a_pose_offsets)
 
         # 5. Hips / Center / Root handling
@@ -238,17 +238,19 @@ class Retargeter:
         return vmd
 
     def _compute_a_pose_offsets(self, ref_pos_lh: np.ndarray, out_offsets: dict[str, np.ndarray]):
-        """Detect A-pose in upper arms and compute compensation to T-pose (horizontal)."""
+        """Detect A-pose in target PMX model vs source reference pose and compute compensation."""
         for sd in SIDES:
-            ua = self.src_map.get(_key("upperArm", sd))
-            la = self.src_map.get(_key("lowerArm", sd))
-            if ua >= 0 and la >= 0:
-                v_src = normalize(ref_pos_lh[la] - ref_pos_lh[ua])
-                # Target T-pose arm vector in MMD: Left arm goes +X [1, 0, 0], Right arm goes -X [-1, 0, 0]
-                v_tgt = np.array([1.0 if sd == "L" else -1.0, 0.0, 0.0])
-                # Check if arm is pointing downward (A-pose: Y < -0.15)
-                if v_src[1] < -0.15:
-                    # Rotation to orient MMD horizontal arm down to source rest arm direction
+            ua_s = self.src_map.get(_key("upperArm", sd))
+            la_s = self.src_map.get(_key("lowerArm", sd))
+            ua_t = self.tgt_map.get(_key("upperArm", sd))
+            la_t = self.tgt_map.get(_key("lowerArm", sd))
+            if ua_s >= 0 and la_s >= 0 and ua_t >= 0 and la_t >= 0:
+                p_ua_t = self.target.bones[ua_t].position
+                p_la_t = self.target.bones[la_t].position
+                v_tgt = normalize(p_la_t - p_ua_t)
+                v_src = normalize(ref_pos_lh[la_s] - ref_pos_lh[ua_s])
+                # Check if target rest arm direction differs from source reference arm direction
+                if np.linalg.norm(v_tgt - v_src) > 0.05:
                     r_corr = rotation_between(v_tgt, v_src)
                     out_offsets[_key("upperArm", sd)] = r_corr
 
@@ -341,13 +343,23 @@ class Retargeter:
             else:
                 tracks[self.target.bones[ua_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(ua_rot))
 
-        # Lower Arm (Elbow)
+        # Lower Arm (Elbow): hinge joint with zero longitudinal twist
         if la_s >= 0 and la_t >= 0:
             p = self.source.parents[la_s]
             r_cur = np.linalg.inv(rot_lh[:, p]) @ rot_lh[:, la_s]
             r_ref = np.linalg.inv(ref_rot_lh[p]) @ ref_rot_lh[la_s]
             la_rot = r_cur @ np.linalg.inv(r_ref)
-            tracks[self.target.bones[la_t].name] = (np.zeros((n_frames, 3)), mat_to_quat(la_rot))
+
+            # Decompose elbow rotation into swing and twist along arm bone axis
+            axis = np.array([1.0 if sd == "L" else -1.0, 0.0, 0.0])
+            q_all = mat_to_quat(la_rot)
+            q_swing, q_twist = swing_twist(q_all, axis)
+            tracks[self.target.bones[la_t].name] = (np.zeros((n_frames, 3)), q_swing)
+
+            # If target model has forearm twist bone (手捩), assign the twist to it
+            hand_twist_t = self.tgt_map.get(_key("handTwist", sd))
+            if self.cfg.enable_twist_bones and hand_twist_t >= 0:
+                tracks[self.target.bones[hand_twist_t].name] = (np.zeros((n_frames, 3)), q_twist)
 
         # Hand (Wrist)
         if hd_s >= 0 and hd_t >= 0:
@@ -393,36 +405,61 @@ class Retargeter:
 
         if self.cfg.enable_foot_ik and leg_ik_t >= 0 and ft_s >= 0:
             # --- Foot IK Generation ---
-            # Foot displacement from reference standing pose scaled to target stature
             leg_ik_pos = (pos_lh[:, ft_s] - ref_pos_lh[ft_s]) * scale
+
+            # Reach clamping to prevent CCD-IK splits and hyperextension
+            if ul_t >= 0 and ll_t >= 0 and ft_t >= 0:
+                p_ul = self.target.bones[ul_t].position
+                p_ll = self.target.bones[ll_t].position
+                p_ft = self.target.bones[ft_t].position
+                p_ik = self.target.bones[leg_ik_t].position
+
+                max_reach = np.linalg.norm(p_ll - p_ul) + np.linalg.norm(p_ft - p_ll)
+                d_max = 0.96 * max_reach
+
+                center_pmx = self.tgt_map.get("center")
+                if center_pmx >= 0:
+                    center_name = self.target.bones[center_pmx].name
+                    if center_name in tracks:
+                        c_pos, c_quat = tracks[center_name]
+                        R_center = quat_to_mat(c_quat)
+                        p_center_rest = self.target.bones[center_pmx].position
+                        p_hip_world = p_center_rest + c_pos + np.einsum("fij,j->fi", R_center, (p_ul - p_center_rest))
+                        p_ik_world = p_ik + leg_ik_pos
+
+                        v_reach = p_ik_world - p_hip_world
+                        dist = np.linalg.norm(v_reach, axis=-1, keepdims=True)
+                        v_clamped = np.where(dist > d_max, v_reach * (d_max / np.maximum(dist, 1e-6)), v_reach)
+                        leg_ik_pos = (p_hip_world + v_clamped) - p_ik
 
             # Foot world rotation delta from source foot
             ft_rot = rot_lh[:, ft_s] @ np.linalg.inv(ref_rot_lh[ft_s])
 
-            tracks[self.target.bones[leg_ik_t].name] = (leg_ik_pos, mat_to_quat(ft_rot))
+            # Eliminate sideways roll so shoe sole stays flat on the floor
+            # In MMD, rest foot points towards -Z, up is +Y
+            v_fwd = ft_rot @ np.array([0.0, 0.0, -1.0])
+            yaw = np.arctan2(-v_fwd[:, 0], -v_fwd[:, 2])
+            pitch = np.arcsin(np.clip(-v_fwd[:, 1], -1.0, 1.0))
+            eulers = np.stack([yaw, pitch, np.zeros_like(yaw)], axis=-1)
+            ft_quat = Rotation.from_euler("yxz", eulers, degrees=False).as_quat()
 
-            # Toe IK
+            tracks[self.target.bones[leg_ik_t].name] = (leg_ik_pos, ft_quat)
+
+            # Toe IK: in PMX, つま先ＩＫ is a child of 足ＩＫ.
+            # Keep displacement relative to 足ＩＫ (0 for rigid attachment or relative stretch)
             if toe_ik_t >= 0 and to_s >= 0:
-                toe_ik_pos = (pos_lh[:, to_s] - ref_pos_lh[to_s]) * scale
-                to_rot = rot_lh[:, to_s] @ np.linalg.inv(ref_rot_lh[to_s])
-                tracks[self.target.bones[toe_ik_t].name] = (toe_ik_pos, mat_to_quat(to_rot))
+                toe_rel = ((pos_lh[:, to_s] - pos_lh[:, ft_s]) - (ref_pos_lh[to_s] - ref_pos_lh[ft_s])) * scale
+                to_rot = rot_lh[:, to_s] @ np.linalg.inv(rot_lh[:, ft_s])
+                tracks[self.target.bones[toe_ik_t].name] = (toe_rel, mat_to_quat(to_rot))
 
-            # When foot IK is enabled, FK leg bones (足, ひざ) keep zero rotation
+            # When foot IK is enabled, FK leg bones (足, ひざ, 足首) keep zero rotation
+            eye_quat = mat_to_quat(np.broadcast_to(np.eye(3), (n_frames, 3, 3)))
             if ul_t >= 0:
-                tracks[self.target.bones[ul_t].name] = (
-                    np.zeros((n_frames, 3)),
-                    mat_to_quat(np.broadcast_to(np.eye(3), (n_frames, 3, 3))),
-                )
+                tracks[self.target.bones[ul_t].name] = (np.zeros((n_frames, 3)), eye_quat)
             if ll_t >= 0:
-                tracks[self.target.bones[ll_t].name] = (
-                    np.zeros((n_frames, 3)),
-                    mat_to_quat(np.broadcast_to(np.eye(3), (n_frames, 3, 3))),
-                )
+                tracks[self.target.bones[ll_t].name] = (np.zeros((n_frames, 3)), eye_quat)
             if ft_t >= 0:
-                tracks[self.target.bones[ft_t].name] = (
-                    np.zeros((n_frames, 3)),
-                    mat_to_quat(np.broadcast_to(np.eye(3), (n_frames, 3, 3))),
-                )
+                tracks[self.target.bones[ft_t].name] = (np.zeros((n_frames, 3)), eye_quat)
         else:
             # --- FK Leg Fallback ---
             if ul_s >= 0 and ul_t >= 0:
